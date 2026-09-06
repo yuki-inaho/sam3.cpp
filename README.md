@@ -42,7 +42,7 @@ pixi run benchmark-cpu     # video tracking benchmark over the vendored models
 
 ### Option B: prebuilt binary (no compiler needed)
 
-Download `sam3-linux-x86_64.tar.gz` from the [Releases](https://github.com/yuki-inaho/sam3.cpp/releases) page, then:
+Download a bundle from the [Releases](https://github.com/yuki-inaho/sam3.cpp/releases) page — `sam3-linux-x86_64.tar.gz` runs on any x86_64 since Haswell, and `sam3-linux-x86_64-avx512.tar.gz` is faster on a CPU with AVX-512 + VNNI (`grep -q avx512_vnni /proc/cpuinfo` to check). Then:
 
 ```bash
 tar xzf sam3-linux-x86_64.tar.gz

@@ -2,22 +2,36 @@ name: Release
 
 on:
   push:
-    # Integration branches build and verify the bundle but never publish
+    # Integration branches build and verify the bundles but never publish
     # (the release job is gated on a tag ref), so tagging is always a
     # release of something that has already run on the target.
     branches: [main, develop]
     tags: ["v*"]
   workflow_dispatch:
 
-env:
-  ARTIFACT: sam3-linux-x86_64
-
 jobs:
   build:
-    name: Build Linux x86_64 (demo bundle)
+    name: Build ${{ matrix.artifact }}
     # ubuntu-latest floats, and the runner's glibc sets the minimum glibc of
     # the produced binaries, so pin the image
     runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Portable: runs on any x86_64 since Haswell. This is what README
+          # promises, so it stays the default asset.
+          - variant: generic
+            artifact: sam3-linux-x86_64
+            isa_args: "-DGGML_AVX2=ON -DGGML_FMA=ON"
+
+          # Tuned for the deployment target (AMD EPYC 9V74, Zen 4): AVX-512
+          # with VNNI, whose vpdpbusd carries the int8 dot products behind
+          # q8_0/q4_0 inference. Will SIGILL on a CPU without AVX-512.
+          - variant: avx512
+            artifact: sam3-linux-x86_64-avx512
+            isa_args: "-DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_AVX512=ON -DGGML_AVX512_VNNI=ON"
 
     steps:
       - name: Checkout
@@ -30,18 +44,18 @@ jobs:
       - name: ccache
         uses: hendrikmuhs/ccache-action@v1
         with:
-          key: release-${{ env.ARTIFACT }}
+          key: release-${{ matrix.artifact }}
 
-      # AVX2 fixed (no GGML_NATIVE) so the binary runs on any x86_64 since
-      # Haswell; no OpenMP and static libstdc++/libgcc so it does not depend
-      # on the build machine's runtime
+      # No GGML_NATIVE so the build never picks up the runner's own CPU; no
+      # OpenMP and static libstdc++/libgcc so the binaries do not depend on
+      # the build machine's runtime
       - name: Configure
         run: >
           cmake -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DGGML_METAL=OFF -DSAM3_METAL=OFF
           -DBUILD_SHARED_LIBS=OFF
-          -DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON
+          -DGGML_NATIVE=OFF ${{ matrix.isa_args }}
           -DGGML_OPENMP=OFF
           -DCMAKE_SKIP_RPATH=ON
           -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
@@ -53,75 +67,118 @@ jobs:
 
       - name: Package
         run: |
-          mkdir -p "staging/$ARTIFACT"/{lib,include,bin,data}
+          mkdir -p "staging/${{ matrix.artifact }}"/{lib,include,bin,data}
 
-          cp build/libsam3.a "staging/$ARTIFACT/lib/"
-          find build/ggml -name "*.a" -exec cp {} "staging/$ARTIFACT/lib/" \;
+          cp build/libsam3.a "staging/${{ matrix.artifact }}/lib/"
+          find build/ggml -name "*.a" -exec cp {} "staging/${{ matrix.artifact }}/lib/" \;
 
-          cp sam3.h "staging/$ARTIFACT/include/"
-          cp -r ggml/include/* "staging/$ARTIFACT/include/"
+          cp sam3.h "staging/${{ matrix.artifact }}/include/"
+          cp -r ggml/include/* "staging/${{ matrix.artifact }}/include/"
 
           for bin in sam3_seg sam3_quantize sam3_benchmark sam3_profile_edgetam; do
-            cp "build/examples/$bin" "staging/$ARTIFACT/bin/"
+            cp "build/examples/$bin" "staging/${{ matrix.artifact }}/bin/"
           done
 
-          cp -r models "staging/$ARTIFACT/models"
-          cp data/test_image.jpg data/test_video.mp4 "staging/$ARTIFACT/data/"
-          cp README-release.md "staging/$ARTIFACT/README.md"
+          cp -r models "staging/${{ matrix.artifact }}/models"
+          cp data/test_image.jpg data/test_video.mp4 "staging/${{ matrix.artifact }}/data/"
+          cp README-release.md "staging/${{ matrix.artifact }}/README.md"
 
-          tar czf "$ARTIFACT.tar.gz" -C staging "$ARTIFACT"
-          ls -lh "$ARTIFACT.tar.gz"
+          tar czf "${{ matrix.artifact }}.tar.gz" -C staging "${{ matrix.artifact }}"
+          ls -lh "${{ matrix.artifact }}.tar.gz"
 
       # The target environment is Debian 13 (glibc 2.41) with no guaranteed
       # libgomp/libstdc++ runtime, so assert those properties on the packaged
-      # binaries rather than trusting the build flags
-      - name: Audit portability
+      # binaries rather than trusting the build flags. The ISA assertions
+      # catch a variant silently building as the other one.
+      - name: Audit portability and ISA
         run: |
-          cd "staging/$ARTIFACT"
+          cd "staging/${{ matrix.artifact }}"
           fail=0
           for f in bin/*; do
             echo "--- $f"
             ldd "$f" || true
+
             need=$(objdump -T "$f" | sed -n 's/.*GLIBC_\([0-9.]*\).*/\1/p' | sort -uV | tail -1)
             echo "max GLIBC required: ${need:-none}"
             if [ -n "$need" ] && [ "$(printf '%s\n2.41\n' "$need" | sort -V | tail -1)" != "2.41" ]; then
               echo "ERROR: requires GLIBC $need, target has 2.41"
               fail=1
             fi
+
             for lib in libgomp libstdc++; do
               if ldd "$f" | grep -q "$lib"; then
                 echo "ERROR: links $lib dynamically (expected static/absent)"
                 fail=1
               fi
             done
+
+            zmm=$(objdump -d "$f" | grep -c '%zmm' || true)
+            vnni=$(objdump -d "$f" | grep -c 'vpdpbusd' || true)
+            echo "AVX-512 zmm refs: $zmm   VNNI vpdpbusd: $vnni"
+            if [ "${{ matrix.variant }}" = "avx512" ]; then
+              if [ "$zmm" -eq 0 ] || [ "$vnni" -eq 0 ]; then
+                echo "ERROR: avx512 variant built without AVX-512/VNNI"
+                fail=1
+              fi
+            else
+              if [ "$zmm" -ne 0 ]; then
+                echo "ERROR: portable variant contains AVX-512; it would SIGILL on pre-AVX-512 CPUs"
+                fail=1
+              fi
+            fi
           done
           exit $fail
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARTIFACT }}
-          path: ${{ env.ARTIFACT }}.tar.gz
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
 
   verify-linux:
-    name: Verify bundle in target env (Debian 13)
+    name: Verify ${{ matrix.artifact }} in target env (Debian 13)
     needs: build
     runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: generic
+            artifact: sam3-linux-x86_64
+          - variant: avx512
+            artifact: sam3-linux-x86_64-avx512
 
     steps:
       - name: Download bundle
         uses: actions/download-artifact@v4
         with:
-          name: ${{ env.ARTIFACT }}
+          name: ${{ matrix.artifact }}
 
       - name: Extract
-        run: tar xzf "$ARTIFACT.tar.gz"
+        run: tar xzf "${{ matrix.artifact }}.tar.gz"
+
+      # The avx512 bundle can only be executed on a runner that has AVX-512.
+      # GitHub does not guarantee the host CPU, so probe it rather than
+      # assume — a missing feature must skip the run, not SIGILL.
+      - name: Probe runner CPU
+        id: cpu
+        run: |
+          grep -m1 "model name" /proc/cpuinfo
+          if grep -q avx512f /proc/cpuinfo; then
+            echo "avx512=yes" >> "$GITHUB_OUTPUT"
+            echo "runner has AVX-512"
+          else
+            echo "avx512=no" >> "$GITHUB_OUTPUT"
+            echo "runner lacks AVX-512"
+          fi
 
       # debian:13 is the deployment target (trixie, glibc 2.41). Running the
       # shipped binaries there is the only real proof the bundle is portable.
       - name: Run the bundle inside debian:trixie
+        if: matrix.variant == 'generic' || steps.cpu.outputs.avx512 == 'yes'
         run: |
-          docker run --rm -v "$PWD/$ARTIFACT:/bundle" -w /bundle debian:13 \
+          docker run --rm -v "$PWD/${{ matrix.artifact }}:/bundle" -w /bundle debian:13 \
             bash -euo pipefail -c '
               echo "debian $(cat /etc/debian_version)"
               # `head -1` here would race: ldd --version echoes several lines
@@ -148,6 +205,11 @@ jobs:
               grep -q "0 FAIL" /tmp/bench.txt
             '
 
+      - name: Report skipped runtime verification
+        if: matrix.variant == 'avx512' && steps.cpu.outputs.avx512 != 'yes'
+        run: |
+          echo "::warning title=AVX-512 runtime check skipped::The runner CPU has no AVX-512, so ${{ matrix.artifact }} could not be executed here. Its ISA and portability were still asserted statically in the build job."
+
   release:
     name: Create Release
     needs: [build, verify-linux]
@@ -157,10 +219,10 @@ jobs:
       contents: write
 
     steps:
-      - name: Download bundle
+      - name: Download all bundles
         uses: actions/download-artifact@v4
         with:
-          name: ${{ env.ARTIFACT }}
+          path: artifacts
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -170,4 +232,4 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
           generate_release_notes: true
-          files: ${{ env.ARTIFACT }}.tar.gz
+          files: artifacts/*/*.tar.gz

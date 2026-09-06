@@ -9,7 +9,19 @@
  *   models/edgetam_*.ggml     vendored EdgeTAM weights (f16 / q8_0 / q4_0)
  *   data/                     sample image + video
  *
- * Requirements: x86_64 CPU with AVX2 + FMA, glibc >= 2.38, any Linux.
+ * Two bundles are published; pick by CPU:
+ *   sam3-linux-x86_64.tar.gz         AVX2 + FMA. Runs on any x86_64 since
+ *                                    Haswell. Use this if unsure.
+ *   sam3-linux-x86_64-avx512.tar.gz  adds AVX-512 + VNNI, whose vpdpbusd
+ *                                    carries the int8 dot products behind
+ *                                    q8_0/q4_0 inference. Faster on a CPU
+ *                                    that has it; SIGILLs on one that
+ *                                    does not.
+ *
+ *   Check with:  grep -q avx512_vnni /proc/cpuinfo && echo "use -avx512"
+ *
+ * Requirements: x86_64 CPU with AVX2 + FMA (plus AVX-512 + VNNI for the
+ * -avx512 bundle), glibc >= 2.38, any Linux.
  * Built and verified on Debian 13 (trixie, glibc 2.41); no libgomp or
  * libstdc++ runtime is needed (statically linked).
  * The video benchmark additionally needs the `ffmpeg` CLI on PATH.
