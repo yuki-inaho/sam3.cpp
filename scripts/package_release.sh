@@ -2,7 +2,7 @@
 # package_release.sh — build and package a portable Linux x86_64 release bundle.
 #
 # Produces dist/sam3-linux-x86_64-<version>.tar.gz containing:
-#   bin/    sam3_seg, sam3_benchmark, sam3_profile_edgetam, sam3_quantize
+#   bin/    sam3_seg, sam3_serve, sam3_benchmark, sam3_profile_edgetam, sam3_quantize
 #   models/ vendored EdgeTAM weights (f16, q8_0, q4_0)
 #   data/   sample image + video
 #   README.md
@@ -48,7 +48,7 @@ echo "=== Assemble bundle ==="
 rm -rf "$BUNDLE" "$ARCHIVE"
 mkdir -p "$BUNDLE/bin"
 
-for bin in sam3_seg sam3_benchmark sam3_profile_edgetam sam3_quantize; do
+for bin in sam3_seg sam3_serve sam3_benchmark sam3_profile_edgetam sam3_quantize; do
     cp "$BUILD_DIR/examples/$bin" "$BUNDLE/bin/"
 done
 

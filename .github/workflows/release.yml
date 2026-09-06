@@ -75,7 +75,7 @@ jobs:
           cp sam3.h "staging/${{ matrix.artifact }}/include/"
           cp -r ggml/include/* "staging/${{ matrix.artifact }}/include/"
 
-          for bin in sam3_seg sam3_quantize sam3_benchmark sam3_profile_edgetam; do
+          for bin in sam3_seg sam3_serve sam3_quantize sam3_benchmark sam3_profile_edgetam; do
             cp "build/examples/$bin" "staging/${{ matrix.artifact }}/bin/"
           done
 

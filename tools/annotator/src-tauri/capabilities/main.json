@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Local-only: file dialogs plus the sam3_serve bridge commands",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open"]
+}

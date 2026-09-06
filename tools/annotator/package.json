@@ -1,0 +1,12 @@
+{
+  "name": "sam3-annotator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dependency-free frontend with a Tauri 2 desktop shell, backed by sam3.cpp",
+  "scripts": {
+    "tauri:dev": "cd src-tauri && cargo run",
+    "tauri:build": "cd src-tauri && cargo build --release",
+    "test": "node tools/run-tests.mjs"
+  },
+  "engines": { "node": ">=20" }
+}

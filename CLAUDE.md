@@ -124,6 +124,14 @@ All options:
 
 Output columns: model name, file size, backend, load time, init time (frame 0 encode + add instance), average per-frame tracking time, total pipeline time, detection count, status. Diagnostics go to stderr; the final table goes to stdout (pipe-friendly: `./build/examples/sam3_benchmark 2>/dev/null > results.txt`).
 
+## Interactive annotation
+
+`examples/sam3_serve.cpp` is a long-lived prompt server: it encodes the image
+once (seconds) and then answers point/box prompts from stdin in roughly half a
+second each, which is what makes click-to-segment usable. `tools/annotator/` is
+a Tauri 2 desktop app on top of it — dependency-free vanilla JS frontend, Rust
+shell, COCO/RLE export. See `tools/annotator/README.md`.
+
 ## Weights
 
 PyTorch checkpoint → `convert_sam3_to_ggml.py` → `.ggml` binary. The conversion stores every tensor (1465 total). The C++ loader registers all 1465 and reads them via `ggml_backend_tensor_set`.

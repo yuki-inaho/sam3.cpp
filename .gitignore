@@ -4,6 +4,7 @@
 # Build
 build/
 build-release/
+build-avx512/
 cmake-build-*/
 .cache/
 
@@ -29,6 +30,9 @@ Thumbs.db
 
 __pycache__
 
+# Tooling-local state
+.serena/
+
 # IDE
 .vscode/
 .idea/
@@ -52,3 +56,8 @@ data/*
 # Release packaging
 dist/
 output/
+
+# Annotator (Tauri/node build output)
+tools/annotator/src-tauri/target/
+tools/annotator/src-tauri/gen/
+tools/annotator/node_modules/

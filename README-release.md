@@ -3,6 +3,8 @@
  *
  * Contents:
  *   bin/sam3_seg              headless point/box segmentation CLI (EdgeTAM etc.)
+ *   bin/sam3_serve            long-lived prompt server: encodes once, then
+ *                             answers point/box prompts over stdin (~0.5 s each)
  *   bin/sam3_profile_edgetam  per-stage encoder latency profiler
  *   bin/sam3_benchmark        video tracking benchmark (needs ffmpeg CLI)
  *   bin/sam3_quantize         weight quantization tool
