@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v*"
+  # Manual runs build and verify the bundles without publishing a release,
+  # so the target-environment check can be exercised before tagging.
+  workflow_dispatch:
 
 jobs:
   build:
@@ -28,7 +31,7 @@ jobs:
             ext: tar.gz
 
           - name: Linux x86_64 (demo bundle)
-            os: ubuntu-latest
+            os: ubuntu-24.04
             artifact: sam3-linux-x86_64
             # AVX2 fixed (no GGML_NATIVE) for portability; static libstdc++ and
             # no OpenMP so the binaries do not need the build machine's runtime
@@ -109,6 +112,32 @@ jobs:
           cd staging
           tar czf ../${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
 
+      # The target environment is Debian 13 (glibc 2.41) with no guaranteed
+      # libgomp/libstdc++ runtime, so assert those properties on the artifact
+      # itself rather than trusting the build flags.
+      - name: Audit portability (Linux bundle)
+        if: matrix.bundle
+        run: |
+          cd staging/${{ matrix.artifact }}
+          fail=0
+          for f in bin/*; do
+            echo "--- $f"
+            ldd "$f" || true
+            need=$(objdump -T "$f" | sed -n 's/.*GLIBC_\([0-9.]*\).*/\1/p' | sort -uV | tail -1)
+            echo "max GLIBC required: ${need:-none}"
+            if [ -n "$need" ] && [ "$(printf '%s\n2.41\n' "$need" | sort -V | tail -1)" != "2.41" ]; then
+              echo "ERROR: requires GLIBC $need, target has 2.41"
+              fail=1
+            fi
+            for lib in libgomp libstdc++; do
+              if ldd "$f" | grep -q "$lib"; then
+                echo "ERROR: links $lib dynamically (expected static/absent)"
+                fail=1
+              fi
+            done
+          done
+          exit $fail
+
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -146,10 +175,51 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.${{ matrix.ext }}
 
+  verify-linux:
+    name: Verify bundle in target env (Debian 13)
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download Linux x86_64 bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: sam3-linux-x86_64
+
+      - name: Extract
+        run: tar xzf sam3-linux-x86_64.tar.gz
+
+      # debian:13 == the deployment target (trixie, glibc 2.41). Running the
+      # shipped binaries there is the only real proof the bundle is portable.
+      - name: Run the bundle inside debian:trixie
+        run: |
+          docker run --rm -v "$PWD/sam3-linux-x86_64:/bundle" -w /bundle debian:13 \
+            bash -euxo pipefail -c '
+              cat /etc/debian_version
+              ldd --version | head -1
+              ldd bin/sam3_seg
+
+              ./bin/sam3_seg --model models/edgetam_q8_0.ggml \
+                             --image data/test_image.jpg --x 315 --y 250 \
+                             --out /tmp/mask.png --cpu
+              test -s /tmp/mask.png
+              echo "OK: sam3_seg produced $(stat -c %s /tmp/mask.png) byte mask"
+
+              # video path needs the ffmpeg CLI (documented in README-release)
+              apt-get update -qq && apt-get install -y -qq ffmpeg >/dev/null
+              # sam3_benchmark exits 0 even when a run fails, so assert on
+              # its SUMMARY line instead of the exit status
+              ./bin/sam3_benchmark --models-dir models --video data/test_video.mp4 \
+                                   --filter edgetam_q8_0 --cpu-only --n-frames 3 \
+                | tee /tmp/bench.txt
+              grep -q "0 FAIL" /tmp/bench.txt
+            '
+
   release:
     name: Create Release
-    needs: build
-    runs-on: ubuntu-latest
+    needs: [build, verify-linux]
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
 
