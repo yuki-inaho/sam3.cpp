@@ -3,6 +3,9 @@
 > 新任 LLM エージェントが `sam3.cpp` に参加する際の初期資料。
 > 記載事実には検証状態を `確認済み` / `未検証` / `推定` で明示する。
 > 最終更新: 2026-09-06 / 対象コミット: `develop` @ `e7c98a8`
+>
+> 本書は「**何を知っておくべきか**」(制約・タスク境界・禁止事項) を扱う。
+> 「**何をどの順でやるか**」(環境構築・動作確認・作業手順) は [`docs/SETUP_GUIDE.md`](./SETUP_GUIDE.md) にある。
 
 ## 1. プロジェクト概要と目的
 
@@ -16,7 +19,7 @@
 - **現時点の進捗サマリ:**
   - アーキテクチャ実装は `PLAN.md` の Phase 0〜10 (重み変換 / BPE トークナイザ / ViT / テキストエンコーダ / DETR デコーダ / PVS / 動画トラッキング / Visual-Only モデル) の構成で進行。
   - **`確認済み`** self-contained 化 (ggml の vendor 化、モデル・データ同梱)、pixi 環境、Linux x86_64 リリース自動化までが `develop` ブランチに入っている。
-  - **`確認済み`** `main` は `01832ef` のまま。`develop` が 5 コミット先行しており、**未マージ**。
+  - **`確認済み`** `main` は `01832ef` のまま。`develop` が先行しており、**未マージ** (差分は `git log --oneline main..develop`)。
 
 ---
 
@@ -195,12 +198,16 @@ cmake -B build -DSAM3_BUILD_TESTS=ON
 
 **連絡先/責任者:** `未確認` — リポジトリオーナーは GitHub `yuki-inaho`。責任分担の定義ファイルは存在しない。
 
-**既知のドキュメント乖離** (`確認済み` 2026-09-06)
+**ドキュメント乖離の修正履歴** (`確認済み` 2026-09-06)
 
-| 箇所 | 内容 |
-|------|------|
-| `CLAUDE.md` の「Quick-iteration recipe」 | `--filter-prec f16,q4_0` を案内しているが、`examples/benchmark.cpp:461-470` にこのフラグは実装されていない。実在するのは `--models-dir` / `--video` / `--point-x` / `--point-y` / `--n-frames` / `--n-threads` / `--encode-img-size` / `--cpu-only` / `--gpu-only` / `--filter` / `--help`。 |
-| `CLAUDE.md` の Build 節 | macOS 前提の `make -j$(sysctl -n hw.ncpu)` を案内している。Linux では `sysctl` のこの用法は使えない。 |
-| `README.md` の Model Zoo | Hugging Face 上の 52 モデルを参照しているが、リポジトリに同梱されているのは EdgeTAM 3 種のみ。 |
+本ドキュメント作成時に実ファイルと突き合わせて 3 件の乖離を検出し、**いずれも修正済み**:
 
-> 上記は本ドキュメント作成時に実ファイルと突き合わせて検出したもの。修正する場合は該当ファイル側を直し、この表からも削除すること。
+| 箇所 | 内容 | 対応 |
+|------|------|------|
+| `CLAUDE.md` | 未実装の `--filter-prec f16,q4_0` を案内していた | 実在するフラグ (`--filter edgetam_q8_0 --cpu-only --n-frames 3`) に置換。`--encode-img-size` を一覧に追加 |
+| `CLAUDE.md` | macOS 専用の `make -j$(sysctl -n hw.ncpu)` | `cmake -B build -G Ninja` + `cmake --build build --parallel` に置換 |
+| `README.md` | プリビルドの展開先を `sam3-linux-x86_64-bundle`、glibc 要件を 2.17 と記載 | CI が実際に公開する `sam3-linux-x86_64` / glibc 2.38 に修正。Model Zoo に「同梱は EdgeTAM 3 種のみ」を追記 |
+
+> `sam3_benchmark` の実フラグは `--models-dir` / `--video` / `--point-x` / `--point-y` / `--n-frames` /
+> `--n-threads` / `--encode-img-size` / `--cpu-only` / `--gpu-only` / `--filter` / `--help` (`examples/benchmark.cpp:461-470`)。
+> 今後も乖離を見つけたら、該当ファイルを直したうえでこの表に記録すること。

@@ -79,22 +79,24 @@ pixi run build          # cmake -B build -G Ninja && cmake --build build
 pixi run demo-cpu       # headless EdgeTAM point-prompt segmentation -> output/mask.png
 pixi run benchmark-cpu  # EdgeTAM video tracking benchmark (3 vendored models)
 
-# or plain cmake
-cd build && cmake .. && make -j$(sysctl -n hw.ncpu)
+# or plain cmake (portable; ggml needs no submodule init)
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
 ```
 
-Tests: `cmake .. -DSAM3_BUILD_TESTS=ON`
+Tests: `cmake -B build -DSAM3_BUILD_TESTS=ON`
 
 ## Benchmarking
 
 `sam3_benchmark` tracks an object across video frames and reports latency for every model × backend combination. Each run is forked into a subprocess so a crash does not kill the suite.
 
 ```bash
-# Full benchmark (all 49 models × Metal + CPU):
+# Full benchmark (every .ggml in --models-dir × Metal + CPU;
+# the vendored models/ holds the 3 EdgeTAM weights):
 ./build/examples/sam3_benchmark
 
-# Quick iteration (e.g. testing an optimization) — 4 runs, ~30 s:
-./build/examples/sam3_benchmark --filter tiny --n-frames 3 --filter-prec f16,q4_0
+# Quick iteration (e.g. testing an optimization) — 1 run, ~30 s:
+./build/examples/sam3_benchmark --filter edgetam_q8_0 --cpu-only --n-frames 3
 
 # Metal only:
 ./build/examples/sam3_benchmark --gpu-only
@@ -103,7 +105,7 @@ Tests: `cmake .. -DSAM3_BUILD_TESTS=ON`
 ./build/examples/sam3_benchmark --cpu-only
 ```
 
-**Quick-iteration recipe:** when profiling or testing optimizations, `--filter tiny --n-frames 3` limits to the SAM2/2.1 tiny models on both Metal and CPU in f16 and q4_0 — just 4 runs total, enough to see whether a change helps without waiting for the full suite.
+**Quick-iteration recipe:** when profiling or testing optimizations, narrow the suite with `--filter` and shorten it with `--n-frames`. Against the vendored weights, `--filter edgetam_q8_0 --cpu-only --n-frames 3` is a single ~30 s run — enough to see whether a change helps without waiting for the full suite. `--filter` matches on the filename, so it also selects a precision (`--filter q4_0`) or a family (`--filter edgetam`).
 
 All options:
 
@@ -118,6 +120,7 @@ All options:
 | `--cpu-only` | | Skip Metal runs |
 | `--gpu-only` | | Skip CPU runs |
 | `--filter <substr>` | | Only run models whose filename contains `<substr>` |
+| `--encode-img-size <n>` | model default | Override the encoder input resolution |
 
 Output columns: model name, file size, backend, load time, init time (frame 0 encode + add instance), average per-frame tracking time, total pipeline time, detection count, status. Diagnostics go to stderr; the final table goes to stdout (pipe-friendly: `./build/examples/sam3_benchmark 2>/dev/null > results.txt`).
 

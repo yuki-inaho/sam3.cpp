@@ -42,17 +42,17 @@ pixi run benchmark-cpu     # video tracking benchmark over the vendored models
 
 ### Option B: prebuilt binary (no compiler needed)
 
-Download `sam3-linux-x86_64-<version>.tar.gz` from the [Releases](https://github.com/yuki-inaho/sam3.cpp/releases) page, then:
+Download `sam3-linux-x86_64.tar.gz` from the [Releases](https://github.com/yuki-inaho/sam3.cpp/releases) page, then:
 
 ```bash
-tar xzf sam3-linux-x86_64-*.tar.gz
-cd sam3-linux-x86_64-bundle
+tar xzf sam3-linux-x86_64.tar.gz
+cd sam3-linux-x86_64
 ./bin/sam3_seg --model models/edgetam_q8_0.ggml \
                --image data/test_image.jpg --x 315 --y 250 \
                --out mask.png --cpu
 ```
 
-Requires any x86_64 Linux with AVX2 (glibc ≥ 2.17). The video benchmark additionally needs the `ffmpeg` CLI (`sudo apt install ffmpeg`).
+Requires any x86_64 Linux with AVX2 (glibc ≥ 2.38; built and verified on Debian 13). The video benchmark additionally needs the `ffmpeg` CLI (`sudo apt install ffmpeg`).
 
 ### Option C: manual build
 
@@ -155,6 +155,8 @@ Options: `--models-dir <path>`, `--video <path>`, `--n-frames <n>`, `--n-threads
 All models are available in GGML format on Hugging Face:
 
 **[PABannier/sam3.cpp](https://huggingface.co/PABannier/sam3.cpp)**: 52 model files covering 4 architectures x multiple sizes x up to 5 precisions.
+
+This repository vendors only the three EdgeTAM weights (`models/edgetam_{f16,q8_0,q4_0}.ggml`) so that the demos run straight after a clone; download the rest from the link above.
 
 ### SAM 3 (850M params, ViT-32 backbone + text encoder + DETR decoder)
 
