@@ -36,8 +36,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+        # ggml is vendored in-tree (pinned snapshot), no submodules needed
 
       - name: Install Ninja (Linux)
         if: runner.os == 'Linux'

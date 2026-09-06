@@ -2,123 +2,82 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
-  # Manual runs build and verify the bundles without publishing a release,
-  # so the target-environment check can be exercised before tagging.
+    # Integration branches build and verify the bundle but never publish
+    # (the release job is gated on a tag ref), so tagging is always a
+    # release of something that has already run on the target.
+    branches: [main, develop]
+    tags: ["v*"]
   workflow_dispatch:
+
+env:
+  ARTIFACT: sam3-linux-x86_64
 
 jobs:
   build:
-    name: Build ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macOS arm64 (Metal)
-            os: macos-latest
-            artifact: sam3-darwin-arm64
-            cmake_args: "-DBUILD_SHARED_LIBS=OFF"
-            build_args: ""
-            ext: tar.gz
-
-          - name: macOS x86_64
-            os: macos-latest
-            artifact: sam3-darwin-x86_64
-            cmake_args: "-DGGML_METAL=OFF -DSAM3_METAL=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_OSX_ARCHITECTURES=x86_64 -DGGML_NATIVE=OFF"
-            build_args: ""
-            ext: tar.gz
-
-          - name: Linux x86_64 (demo bundle)
-            os: ubuntu-24.04
-            artifact: sam3-linux-x86_64
-            # AVX2 fixed (no GGML_NATIVE) for portability; static libstdc++ and
-            # no OpenMP so the binaries do not need the build machine's runtime
-            cmake_args: "-DGGML_METAL=OFF -DSAM3_METAL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_OPENMP=OFF -DCMAKE_SKIP_RPATH=ON -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'"
-            build_args: ""
-            bundle: true
-            ext: tar.gz
-
-          - name: Linux arm64
-            os: ubuntu-24.04-arm
-            artifact: sam3-linux-arm64
-            cmake_args: "-DGGML_METAL=OFF -DSAM3_METAL=OFF -DBUILD_SHARED_LIBS=OFF"
-            build_args: ""
-            ext: tar.gz
-
-          - name: Windows x86_64
-            os: windows-latest
-            artifact: sam3-win-x86_64
-            cmake_args: "-DGGML_METAL=OFF -DSAM3_METAL=OFF -DBUILD_SHARED_LIBS=OFF -A x64"
-            build_args: "--config Release"
-            ext: zip
+    name: Build Linux x86_64 (demo bundle)
+    # ubuntu-latest floats, and the runner's glibc sets the minimum glibc of
+    # the produced binaries, so pin the image
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         # ggml is vendored in-tree (pinned snapshot), no submodules needed
 
-      - name: Install Ninja (Linux)
-        if: runner.os == 'Linux'
+      - name: Install Ninja
         run: sudo apt-get update && sudo apt-get install -y ninja-build
-
-      - name: Install Ninja (macOS)
-        if: runner.os == 'macOS'
-        run: brew install ninja
 
       - name: ccache
         uses: hendrikmuhs/ccache-action@v1
         with:
-          key: release-${{ matrix.artifact }}
+          key: release-${{ env.ARTIFACT }}
 
+      # AVX2 fixed (no GGML_NATIVE) so the binary runs on any x86_64 since
+      # Haswell; no OpenMP and static libstdc++/libgcc so it does not depend
+      # on the build machine's runtime
       - name: Configure
         run: >
-          cmake -B build
-          ${{ runner.os != 'Windows' && '-G Ninja' || '' }}
-          ${{ matrix.cmake_args }}
-          ${{ runner.os != 'Windows' && '-DCMAKE_BUILD_TYPE=Release' || '' }}
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DGGML_METAL=OFF -DSAM3_METAL=OFF
+          -DBUILD_SHARED_LIBS=OFF
+          -DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON
+          -DGGML_OPENMP=OFF
+          -DCMAKE_SKIP_RPATH=ON
+          -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
           -DCMAKE_C_COMPILER_LAUNCHER=ccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build
-        run: cmake --build build ${{ matrix.build_args }} --parallel
+        run: cmake --build build --parallel
 
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+      - name: Package
         run: |
-          mkdir -p staging/${{ matrix.artifact }}/{lib,include,bin}
+          mkdir -p "staging/$ARTIFACT"/{lib,include,bin,data}
 
-          cp build/libsam3.a staging/${{ matrix.artifact }}/lib/
-          find build/ggml -name "*.a" -exec cp {} staging/${{ matrix.artifact }}/lib/ \;
+          cp build/libsam3.a "staging/$ARTIFACT/lib/"
+          find build/ggml -name "*.a" -exec cp {} "staging/$ARTIFACT/lib/" \;
 
-          cp sam3.h staging/${{ matrix.artifact }}/include/
-          cp -r ggml/include/* staging/${{ matrix.artifact }}/include/
+          cp sam3.h "staging/$ARTIFACT/include/"
+          cp -r ggml/include/* "staging/$ARTIFACT/include/"
 
           for bin in sam3_seg sam3_quantize sam3_benchmark sam3_profile_edgetam; do
-            if [ -f "build/examples/${bin}" ]; then
-              cp "build/examples/${bin}" staging/${{ matrix.artifact }}/bin/
-            fi
+            cp "build/examples/$bin" "staging/$ARTIFACT/bin/"
           done
 
-          # Linux x86_64 ships a runnable demo bundle (models + sample data)
-          if [ "${{ matrix.bundle }}" = "true" ]; then
-            cp -r models staging/${{ matrix.artifact }}/models
-            mkdir -p staging/${{ matrix.artifact }}/data
-            cp data/test_image.jpg data/test_video.mp4 staging/${{ matrix.artifact }}/data/
-            cp README-release.md staging/${{ matrix.artifact }}/README.md
-          fi
+          cp -r models "staging/$ARTIFACT/models"
+          cp data/test_image.jpg data/test_video.mp4 "staging/$ARTIFACT/data/"
+          cp README-release.md "staging/$ARTIFACT/README.md"
 
-          cd staging
-          tar czf ../${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+          tar czf "$ARTIFACT.tar.gz" -C staging "$ARTIFACT"
+          ls -lh "$ARTIFACT.tar.gz"
 
       # The target environment is Debian 13 (glibc 2.41) with no guaranteed
-      # libgomp/libstdc++ runtime, so assert those properties on the artifact
-      # itself rather than trusting the build flags.
-      - name: Audit portability (Linux bundle)
-        if: matrix.bundle
+      # libgomp/libstdc++ runtime, so assert those properties on the packaged
+      # binaries rather than trusting the build flags
+      - name: Audit portability
         run: |
-          cd staging/${{ matrix.artifact }}
+          cd "staging/$ARTIFACT"
           fail=0
           for f in bin/*; do
             echo "--- $f"
@@ -138,42 +97,11 @@ jobs:
           done
           exit $fail
 
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path staging/${{ matrix.artifact }}/lib
-          New-Item -ItemType Directory -Force -Path staging/${{ matrix.artifact }}/include
-          New-Item -ItemType Directory -Force -Path staging/${{ matrix.artifact }}/bin
-
-          # Library (MSVC multi-config puts outputs in Release/)
-          $libPaths = @("build/Release/sam3.lib", "build/sam3.lib")
-          foreach ($p in $libPaths) {
-            if (Test-Path $p) { Copy-Item $p staging/${{ matrix.artifact }}/lib/; break }
-          }
-
-          # ggml static libs
-          Get-ChildItem -Path build/ggml -Recurse -Filter "*.lib" | Copy-Item -Destination staging/${{ matrix.artifact }}/lib/
-
-          # Headers
-          Copy-Item sam3.h staging/${{ matrix.artifact }}/include/
-          Get-ChildItem -Path ggml/include -Filter "*.h" | Copy-Item -Destination staging/${{ matrix.artifact }}/include/
-
-          # Example binaries
-          foreach ($bin in @("sam3_seg", "sam3_quantize", "sam3_benchmark", "sam3_profile_edgetam")) {
-            $paths = @("build/examples/Release/${bin}.exe", "build/examples/${bin}.exe")
-            foreach ($p in $paths) {
-              if (Test-Path $p) { Copy-Item $p staging/${{ matrix.artifact }}/bin/; break }
-            }
-          }
-
-          Compress-Archive -Path staging/${{ matrix.artifact }} -DestinationPath ${{ matrix.artifact }}.zip
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.${{ matrix.ext }}
+          name: ${{ env.ARTIFACT }}
+          path: ${{ env.ARTIFACT }}.tar.gz
 
   verify-linux:
     name: Verify bundle in target env (Debian 13)
@@ -181,21 +109,21 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Download Linux x86_64 bundle
+      - name: Download bundle
         uses: actions/download-artifact@v4
         with:
-          name: sam3-linux-x86_64
+          name: ${{ env.ARTIFACT }}
 
       - name: Extract
-        run: tar xzf sam3-linux-x86_64.tar.gz
+        run: tar xzf "$ARTIFACT.tar.gz"
 
-      # debian:13 == the deployment target (trixie, glibc 2.41). Running the
+      # debian:13 is the deployment target (trixie, glibc 2.41). Running the
       # shipped binaries there is the only real proof the bundle is portable.
       - name: Run the bundle inside debian:trixie
         run: |
-          docker run --rm -v "$PWD/sam3-linux-x86_64:/bundle" -w /bundle debian:13 \
-            bash -euxo pipefail -c '
-              cat /etc/debian_version
+          docker run --rm -v "$PWD/$ARTIFACT:/bundle" -w /bundle debian:13 \
+            bash -euo pipefail -c '
+              echo "debian $(cat /etc/debian_version)"
               ldd --version | head -1
               ldd bin/sam3_seg
 
@@ -205,10 +133,11 @@ jobs:
               test -s /tmp/mask.png
               echo "OK: sam3_seg produced $(stat -c %s /tmp/mask.png) byte mask"
 
-              # video path needs the ffmpeg CLI (documented in README-release)
+              # the video path needs the ffmpeg CLI (documented in README-release);
+              # this is what the ffmpeg 8 `-vsync` removal broke, so exercise it.
+              # sam3_benchmark exits 0 even when a run fails, so assert on its
+              # SUMMARY line instead of the exit status.
               apt-get update -qq && apt-get install -y -qq ffmpeg >/dev/null
-              # sam3_benchmark exits 0 even when a run fails, so assert on
-              # its SUMMARY line instead of the exit status
               ./bin/sam3_benchmark --models-dir models --video data/test_video.mp4 \
                                    --filter edgetam_q8_0 --cpu-only --n-frames 3 \
                 | tee /tmp/bench.txt
@@ -218,16 +147,16 @@ jobs:
   release:
     name: Create Release
     needs: [build, verify-linux]
-    runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
     steps:
-      - name: Download all artifacts
+      - name: Download bundle
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          name: ${{ env.ARTIFACT }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -237,9 +166,4 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
           generate_release_notes: true
-          files: |
-            artifacts/sam3-darwin-arm64/*.tar.gz
-            artifacts/sam3-darwin-x86_64/*.tar.gz
-            artifacts/sam3-linux-x86_64/*.tar.gz
-            artifacts/sam3-linux-arm64/*.tar.gz
-            artifacts/sam3-win-x86_64/*.zip
+          files: ${{ env.ARTIFACT }}.tar.gz
