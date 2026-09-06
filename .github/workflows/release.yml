@@ -116,11 +116,20 @@ jobs:
             vnni=$(objdump -d "$f" | grep -c 'vpdpbusd' || true)
             echo "AVX-512 zmm refs: $zmm   VNNI vpdpbusd: $vnni"
             if [ "${{ matrix.variant }}" = "avx512" ]; then
-              if [ "$zmm" -eq 0 ] || [ "$vnni" -eq 0 ]; then
-                echo "ERROR: avx512 variant built without AVX-512/VNNI"
-                fail=1
-              fi
+              # sam3_quantize only converts weights and links none of ggml's
+              # SIMD inference kernels, so it legitimately carries no AVX-512.
+              case "$(basename "$f")" in
+                sam3_quantize) echo "(no inference kernels; ISA check skipped)" ;;
+                *)
+                  if [ "$zmm" -eq 0 ] || [ "$vnni" -eq 0 ]; then
+                    echo "ERROR: avx512 variant built without AVX-512/VNNI"
+                    fail=1
+                  fi
+                  ;;
+              esac
             else
+              # This direction applies to every binary: any zmm at all would
+              # SIGILL on a pre-AVX-512 CPU.
               if [ "$zmm" -ne 0 ]; then
                 echo "ERROR: portable variant contains AVX-512; it would SIGILL on pre-AVX-512 CPUs"
                 fail=1
