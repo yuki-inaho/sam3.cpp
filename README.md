@@ -21,29 +21,55 @@ Running Meta's Segment Anything models typically requires Python, PyTorch, and a
 
 ## Quick Start
 
+Everything is self-contained: the ggml sources are vendored in-tree (pinned to `331b9cba`), the EdgeTAM demo weights are in `models/`, and the sample image/video are in `data/`. Clone once and run — no submodules, no model downloads.
+
+### Option A: pixi (recommended, one-command build + demo)
+
 ```bash
-# Clone
-git clone --recursive https://github.com/PABannier/sam3.cpp
+git clone https://github.com/yuki-inaho/sam3.cpp
 cd sam3.cpp
 
-# Build (Metal GPU enabled automatically on macOS)
+# Build (pixi provisions cmake/ninja/compilers/ffmpeg automatically)
+pixi run build
+
+# Headless CPU demo: segment the two-cats image with the vendored EdgeTAM model
+pixi run demo-cpu          # -> output/mask.png
+
+# More demos
+pixi run profile-cpu       # per-stage encoder latency breakdown
+pixi run benchmark-cpu     # video tracking benchmark over the vendored models
+```
+
+### Option B: prebuilt binary (no compiler needed)
+
+Download `sam3-linux-x86_64-<version>.tar.gz` from the [Releases](https://github.com/yuki-inaho/sam3.cpp/releases) page, then:
+
+```bash
+tar xzf sam3-linux-x86_64-*.tar.gz
+cd sam3-linux-x86_64-bundle
+./bin/sam3_seg --model models/edgetam_q8_0.ggml \
+               --image data/test_image.jpg --x 315 --y 250 \
+               --out mask.png --cpu
+```
+
+Requires any x86_64 Linux with AVX2 (glibc ≥ 2.17). The video benchmark additionally needs the `ffmpeg` CLI (`sudo apt install ffmpeg`).
+
+### Option C: manual build
+
+```bash
+git clone https://github.com/yuki-inaho/sam3.cpp
+cd sam3.cpp
 mkdir build && cd build
 cmake ..
 make -j
 
-# Download a model (SAM 2.1 Tiny, 75 MB)
-# See "Model Zoo" below for all available models and download links
-curl -L -o ../models/sam2.1_hiera_tiny_f16.ggml \
-  https://huggingface.co/PABannier/sam3.cpp/resolve/main/sam2.1_hiera_tiny_f16.ggml
-
-# Segment an image interactively (requires SDL2)
-./examples/sam3_image --model ../models/sam2.1_hiera_tiny_f16.ggml --image ../data/test_image.jpg
-
-# Track objects in a video interactively (requires SDL2)
-./examples/sam3_video --model ../models/sam2.1_hiera_tiny_f16.ggml --video ../data/test_video.mp4
+# Segment an image (vendored EdgeTAM model, headless)
+./examples/sam3_seg --model ../models/edgetam_q8_0.ggml \
+                    --image ../data/test_image.jpg --x 315 --y 250 \
+                    --out mask.png --cpu
 ```
 
-The interactive apps use SDL2 + ImGui. If SDL2 isn't found, only the benchmark and quantize tools are built.
+The interactive apps use SDL2 + ImGui. If SDL2 isn't found, only the headless tools (`sam3_seg`, `sam3_benchmark`, `sam3_profile_edgetam`, `sam3_quantize`) are built.
 
 ## Benchmarks
 
@@ -165,6 +191,8 @@ All models are available in GGML format on Hugging Face:
 | edgetam | q8_0 | 19 MB | Same |
 | edgetam | q4_0 | 15 MB | Same |
 
+The three EdgeTAM files are **vendored in `models/`** so the demos work out of the box. Other models are available on Hugging Face ([PABannier/sam3.cpp](https://huggingface.co/PABannier/sam3.cpp)) — drop the `.ggml` file into `models/` and point `--model` at it.
+
 ### Feature Matrix
 
 | Capability | SAM 3 | SAM 3 Visual | SAM 2 / 2.1 | EdgeTAM |
@@ -184,17 +212,25 @@ All models are available in GGML format on Hugging Face:
 - C++14 compiler (Clang, GCC, MSVC)
 - CMake 3.14+
 - (Optional) SDL2 for the interactive image/video examples
-- (Optional) ffmpeg for video frame decoding
+- (Optional) ffmpeg for video frame decoding — bundled with the pixi environment
 
 ### Build
 
 ```bash
-git clone --recursive https://github.com/PABannier/sam3.cpp
+git clone https://github.com/yuki-inaho/sam3.cpp
 cd sam3.cpp
 mkdir build && cd build
 cmake ..
 make -j
 ```
+
+Or with pixi (provisions cmake, ninja, a C++ compiler and ffmpeg):
+
+```bash
+pixi run build
+```
+
+ggml is vendored in-tree at a pinned snapshot (PABannier/ggml @ `331b9cba`, which adds Metal `flash_attn_ext` and `conv_transpose_2d` support), so no `--recursive` clone is needed.
 
 Metal is enabled automatically on macOS. To disable it:
 

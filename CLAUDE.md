@@ -49,7 +49,7 @@ When lost on how to structure the ggml forward pass, how to build graphs, or how
 
 1. **sam.cpp** (https://github.com/YavorGIvanov/sam.cpp) — the original SAM 1 port to C++/ggml. Study `sam.cpp` and `sam.h` for patterns: graph construction, two-pass measure+compute, `ggml_backend_tensor_set`, window partition, attention with relative position, mask decoder upscaling. Our code follows the same conventions.
 
-2. **ggml examples** (`ggml/examples/` in the submodule) — canonical, up-to-date examples of how to use ggml APIs. Check these for: backend init, graph allocation (`ggml_gallocr`), tensor creation, `ggml_backend_graph_compute`, Metal usage. The ggml API evolves; the submodule examples are always correct for our pinned version.
+2. **ggml examples** (`ggml/examples/`, vendored in-tree) — canonical, up-to-date examples of how to use ggml APIs. Check these for: backend init, graph allocation (`ggml_gallocr`), tensor creation, `ggml_backend_graph_compute`, Metal usage. The ggml API evolves; the vendored examples are always correct for our pinned version.
 
 3. **SAM 3 official repo** (https://github.com/facebookresearch/sam3) — the ground truth for the forward pass. When in doubt about tensor shapes, operation order, activation functions, or any architectural detail, read the Python source. The paper is in `sam3.pdf`.
 
@@ -63,7 +63,7 @@ When lost on how to structure the ggml forward pass, how to build graphs, or how
 
 ## Dependencies
 
-Only: ggml (submodule), stb_image/stb_image_write (vendored in `stb/`), C++14 standard library. Nothing else in the library. SDL2/ImGui are example-only.
+Only: ggml (vendored in-tree at `ggml/`), stb_image/stb_image_write (vendored in `stb/`), C++14 standard library. Nothing else in the library. SDL2/ImGui are example-only.
 
 ## Python
 
@@ -71,7 +71,15 @@ Only: ggml (submodule), stb_image/stb_image_write (vendored in `stb/`), C++14 st
 
 ## Build
 
+ggml is **vendored in-tree** (not a submodule) at the pinned snapshot `331b9cba52b23d895bc4ad218c007eb5e667540f` (PABannier/ggml, sam3-metal-ops branch). EdgeTAM demo weights are vendored in `models/` and sample data in `data/`, so the repo is self-contained: clone → build → run.
+
 ```bash
+# pixi (preferred — provisions cmake/ninja/compiler/ffmpeg)
+pixi run build          # cmake -B build -G Ninja && cmake --build build
+pixi run demo-cpu       # headless EdgeTAM point-prompt segmentation -> output/mask.png
+pixi run benchmark-cpu  # EdgeTAM video tracking benchmark (3 vendored models)
+
+# or plain cmake
 cd build && cmake .. && make -j$(sysctl -n hw.ncpu)
 ```
 

@@ -3,12 +3,22 @@
 
 # Build
 build/
+build-release/
 cmake-build-*/
 .cache/
 
-# Models/weights
-models/
+# pixi
+.pixi/
+
+# Models/weights (EdgeTAM demo models are vendored)
+models/*
+!models/edgetam_f16.ggml
+!models/edgetam_q8_0.ggml
+!models/edgetam_q4_0.ggml
 *.ggml
+!models/edgetam_f16.ggml
+!models/edgetam_q8_0.ggml
+!models/edgetam_q4_0.ggml
 *.bin
 *.pt
 *.pth
@@ -34,5 +44,11 @@ tests/debug_*
 tests/ref*/
 raw_weights/
 
-# Test data
-data/
+# Test data (sample image/video are vendored)
+data/*
+!data/test_image.jpg
+!data/test_video.mp4
+
+# Release packaging
+dist/
+output/

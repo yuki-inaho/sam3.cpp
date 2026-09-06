@@ -12292,7 +12292,7 @@ sam3_image sam3_decode_video_frame(const std::string& video_path, int frame_inde
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
              "ffmpeg -nostdin -loglevel error -i \"%s\" "
-             "-vf \"select=eq(n\\,%d)\" -vsync vfr -frames:v 1 "
+             "-vf \"select=eq(n\\,%d)\" -frames:v 1 "
              "-f rawvideo -pix_fmt rgb24 pipe:1 2>%s",
              video_path.c_str(), frame_index, SAM3_NULL_DEV);
 

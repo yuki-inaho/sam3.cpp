@@ -27,11 +27,14 @@ jobs:
             build_args: ""
             ext: tar.gz
 
-          - name: Linux x86_64
+          - name: Linux x86_64 (demo bundle)
             os: ubuntu-latest
             artifact: sam3-linux-x86_64
-            cmake_args: "-DGGML_METAL=OFF -DSAM3_METAL=OFF -DBUILD_SHARED_LIBS=OFF"
+            # AVX2 fixed (no GGML_NATIVE) for portability; static libstdc++ and
+            # no OpenMP so the binaries do not need the build machine's runtime
+            cmake_args: "-DGGML_METAL=OFF -DSAM3_METAL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_OPENMP=OFF -DCMAKE_SKIP_RPATH=ON -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'"
             build_args: ""
+            bundle: true
             ext: tar.gz
 
           - name: Linux arm64
@@ -51,8 +54,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+        # ggml is vendored in-tree (pinned snapshot), no submodules needed
 
       - name: Install Ninja (Linux)
         if: runner.os == 'Linux'
@@ -90,11 +92,19 @@ jobs:
           cp sam3.h staging/${{ matrix.artifact }}/include/
           cp -r ggml/include/* staging/${{ matrix.artifact }}/include/
 
-          for bin in sam3_quantize sam3_benchmark sam3_profile_edgetam; do
+          for bin in sam3_seg sam3_quantize sam3_benchmark sam3_profile_edgetam; do
             if [ -f "build/examples/${bin}" ]; then
               cp "build/examples/${bin}" staging/${{ matrix.artifact }}/bin/
             fi
           done
+
+          # Linux x86_64 ships a runnable demo bundle (models + sample data)
+          if [ "${{ matrix.bundle }}" = "true" ]; then
+            cp -r models staging/${{ matrix.artifact }}/models
+            mkdir -p staging/${{ matrix.artifact }}/data
+            cp data/test_image.jpg data/test_video.mp4 staging/${{ matrix.artifact }}/data/
+            cp README-release.md staging/${{ matrix.artifact }}/README.md
+          fi
 
           cd staging
           tar czf ../${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
@@ -121,7 +131,7 @@ jobs:
           Get-ChildItem -Path ggml/include -Filter "*.h" | Copy-Item -Destination staging/${{ matrix.artifact }}/include/
 
           # Example binaries
-          foreach ($bin in @("sam3_quantize", "sam3_benchmark", "sam3_profile_edgetam")) {
+          foreach ($bin in @("sam3_seg", "sam3_quantize", "sam3_benchmark", "sam3_profile_edgetam")) {
             $paths = @("build/examples/Release/${bin}.exe", "build/examples/${bin}.exe")
             foreach ($p in $paths) {
               if (Test-Path $p) { Copy-Item $p staging/${{ matrix.artifact }}/bin/; break }

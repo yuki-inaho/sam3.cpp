@@ -1,0 +1,31 @@
+[workspace]
+name = "sam3cpp"
+version = "1.0.0"
+description = "sam3.cpp — SAM2/SAM3/EdgeTAM segmentation in portable C++ (build & demo environment)"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-64", "osx-arm64"]
+
+[dependencies]
+cmake = ">=3.31"
+ninja = ">=1.11"
+cxx-compiler = ">=1.7"
+ffmpeg = ">=6.0"
+patchelf = ">=0.17"
+
+# ── Tasks ────────────────────────────────────────────────────────────────
+# configure / build : full library + CLI examples (GUI needs SDL2, optional)
+# demo-cpu          : headless EdgeTAM point-prompt segmentation on the
+#                     vendored test image -> output/mask.png
+# profile-cpu       : per-stage EdgeTAM encoder latency breakdown
+# benchmark-cpu     : video tracking benchmark over the vendored EdgeTAM
+#                     models (needs ffmpeg, provided by this environment)
+# release-build     : portable linux-x86_64 bundle in dist/ (see
+#                     scripts/package_release.sh)
+
+[tasks]
+configure = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_CCACHE=OFF"
+build = { cmd = "cmake --build build --parallel", depends-on = ["configure"] }
+demo-cpu = { cmd = "mkdir -p output && ./build/examples/sam3_seg --model models/edgetam_q8_0.ggml --image data/test_image.jpg --x 315 --y 250 --out output/mask.png --cpu --n-threads 4", depends-on = ["build"] }
+profile-cpu = { cmd = "./build/examples/sam3_profile_edgetam --model models/edgetam_q8_0.ggml --image data/test_image.jpg --cpu", depends-on = ["build"] }
+benchmark-cpu = { cmd = "./build/examples/sam3_benchmark --models-dir models --video data/test_video.mp4 --filter edgetam --cpu-only --n-frames 3 --n-threads 4", depends-on = ["build"] }
+release-build = "bash scripts/package_release.sh"
