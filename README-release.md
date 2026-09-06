@@ -9,7 +9,9 @@
  *   models/edgetam_*.ggml     vendored EdgeTAM weights (f16 / q8_0 / q4_0)
  *   data/                     sample image + video
  *
- * Requirements: x86_64 CPU with AVX2 + FMA, glibc >= 2.17, any Linux.
+ * Requirements: x86_64 CPU with AVX2 + FMA, glibc >= 2.38, any Linux.
+ * Built and verified on Debian 13 (trixie, glibc 2.41); no libgomp or
+ * libstdc++ runtime is needed (statically linked).
  * The video benchmark additionally needs the `ffmpeg` CLI on PATH.
  * (Debian/Ubuntu: sudo apt install ffmpeg)
  *

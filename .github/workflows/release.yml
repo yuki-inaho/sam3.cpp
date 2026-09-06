@@ -124,7 +124,10 @@ jobs:
           docker run --rm -v "$PWD/$ARTIFACT:/bundle" -w /bundle debian:13 \
             bash -euo pipefail -c '
               echo "debian $(cat /etc/debian_version)"
-              ldd --version | head -1
+              # `head -1` here would race: ldd --version echoes several lines
+              # and head closing the pipe first kills it with SIGPIPE, which
+              # pipefail then turns into a spurious 141. sed reads all input.
+              ldd --version | sed -n 1p
               ldd bin/sam3_seg
 
               ./bin/sam3_seg --model models/edgetam_q8_0.ggml \
@@ -137,6 +140,7 @@ jobs:
               # this is what the ffmpeg 8 `-vsync` removal broke, so exercise it.
               # sam3_benchmark exits 0 even when a run fails, so assert on its
               # SUMMARY line instead of the exit status.
+              export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq && apt-get install -y -qq ffmpeg >/dev/null
               ./bin/sam3_benchmark --models-dir models --video data/test_video.mp4 \
                                    --filter edgetam_q8_0 --cpu-only --n-frames 3 \
