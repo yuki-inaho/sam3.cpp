@@ -11,7 +11,7 @@
 <header class="bar">
   <strong class="brand">sam3 Annotator</strong>
   <span id="imageName" class="file">画像未読み込み</span>
-  <span id="status" class="status">起動中…</span>
+  <span id="status" class="status" role="status" aria-live="polite">起動中…</span>
 </header>
 
 <main class="layout">
@@ -21,53 +21,56 @@
       <div class="row">
         <input id="modelPath" type="text" placeholder="models/edgetam_q8_0.ggml"
                value="models/edgetam_q8_0.ggml">
-        <button id="browseModel" class="ghost" title="参照">…</button>
+        <button type="button" id="browseModel" class="ghost" title="参照">…</button>
       </div>
       <label class="check"><input id="cpu" type="checkbox" checked> CPU を使う</label>
       <label class="row small">スレッド
         <input id="threads" type="number" min="1" max="32" value="4">
       </label>
-      <button id="startModel" class="primary">モデル開始</button>
+      <button type="button" id="startModel" class="primary">モデル開始</button>
       <p class="hint">読み込みと画像エンコードに数秒かかります。以降のプロンプトは高速です。</p>
     </section>
 
     <section>
       <h2>画像</h2>
-      <button id="openImage">画像を開く</button>
-      <button id="fit" class="ghost">全体表示</button>
+      <button type="button" id="openImage">画像を開く</button>
+      <button type="button" id="fit" class="ghost">全体表示</button>
     </section>
 
     <section>
       <h2>プロンプト</h2>
-      <div class="modes">
-        <button data-mode="point" class="on">点</button>
-        <button data-mode="box">矩形</button>
+      <div class="modes" role="group" aria-label="プロンプト種別">
+        <button type="button" data-mode="point" class="on" aria-pressed="true">点</button>
+        <button type="button" data-mode="box" aria-pressed="false">矩形</button>
+        <button type="button" data-mode="pan" aria-pressed="false">移動</button>
       </div>
-      <p class="hint">クリックで前景、<kbd>Shift</kbd>+クリック か右クリックで背景。ホイールで拡大。</p>
+      <p class="hint">クリックで前景、<kbd>Shift</kbd>+クリック か右クリックで背景。ホイールで拡大、<kbd>Alt</kbd>+ドラッグか中ボタンで移動。</p>
       <label class="check"><input id="auto" type="checkbox" checked> クリックごとに自動実行</label>
       <label class="check"><input id="multimask" type="checkbox"> 候補を 3 つ出す</label>
       <div class="row">
-        <button id="segment">実行 <kbd>Space</kbd></button>
-        <button id="clear" class="ghost">消去 <kbd>Esc</kbd></button>
+        <button type="button" id="segment">実行 <kbd>Space</kbd></button>
+        <button type="button" id="undo" class="ghost">戻す <kbd>Ctrl+Z</kbd></button>
+        <button type="button" id="clear" class="ghost">消去 <kbd>Esc</kbd></button>
       </div>
       <div id="candidates" class="chips"></div>
       <div class="row">
         <input id="label" type="text" placeholder="ラベル名" value="object">
-        <button id="accept" class="primary" disabled>確定 <kbd>↵</kbd></button>
+        <button type="button" id="accept" class="primary" disabled>確定 <kbd>↵</kbd></button>
       </div>
     </section>
 
     <section class="grow">
       <h2>インスタンス <span id="count" class="badge">0</span></h2>
-      <ul id="instances" class="instances"></ul>
+      <ul id="instances" class="instances" aria-label="確定済みインスタンス"></ul>
     </section>
 
-    <section>
-      <button id="export" class="primary" disabled>COCO を書き出す</button>
+    <section class="footer">
+      <button type="button" id="export" class="primary" disabled>COCO を書き出す</button>
     </section>
   </aside>
 
   <div class="stage">
+    <p id="browserNote" class="browser-note">この画面はブラウザで開かれています。画像の読み込みと SAM セグメンテーションはデスクトップ版 (Tauri) でのみ動作します。</p>
     <canvas id="canvas"></canvas>
   </div>
 </main>

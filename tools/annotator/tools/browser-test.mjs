@@ -89,8 +89,13 @@ await page.goto(base);
 await page.waitForFunction(() => document.getElementById('status').textContent !== '起動中…');
 
 check('native mode is detected', !(await page.evaluate(() => document.body.classList.contains('browser'))));
-check('SAM controls are enabled under Tauri',
-  !(await page.locator('#segment').isDisabled()));
+// Controls now reflect what is actually possible: the entry points are live,
+// but 実行 stays disabled until a model, an image and a prompt all exist.
+check('the entry-point controls are live under Tauri',
+  !(await page.locator('#startModel').isDisabled()) &&
+  !(await page.locator('#openImage').isDisabled()));
+check('実行 is disabled before a model and a prompt exist',
+  await page.locator('#segment').isDisabled());
 
 // --- model ---
 await page.click('#startModel');
@@ -249,8 +254,119 @@ check('Enter in the label field accepts, as its badge claims',
 check('the label typed at accept time is the one kept',
   (await page.locator('#instances .name').last().inputValue()) === 'dog');
 
+// --- view: pan, and zoom that survives a resize ---
+await page.evaluate(() => { window.__VIEW__ = null; });
+const readView = () => page.evaluate(() => {
+  // derive the view from where a known image point lands on screen
+  const c = document.getElementById('canvas');
+  return { w: c.width, h: c.height };
+});
+await page.mouse.move(boxEl.x + 300, boxEl.y + 300);
+await page.mouse.wheel(0, -240);           // zoom in
+await page.waitForTimeout(120);
+const zoomed = await page.screenshot({ clip: { x: boxEl.x + 200, y: boxEl.y + 200, width: 120, height: 120 } });
+await page.setViewportSize({ width: 1180, height: 780 });
+await page.waitForTimeout(200);
+await page.setViewportSize({ width: 1280, height: 820 });
+await page.waitForTimeout(200);
+const afterResize = await page.screenshot({ clip: { x: boxEl.x + 200, y: boxEl.y + 200, width: 120, height: 120 } });
+check('a window resize does not reset the zoom',
+  Buffer.compare(zoomed, afterResize) === 0);
+
+// Alt+drag pans from any mode.
+const beforePan = await page.screenshot({ clip: { x: boxEl.x + 200, y: boxEl.y + 200, width: 120, height: 120 } });
+await page.keyboard.down('Alt');
+await page.mouse.move(boxEl.x + 400, boxEl.y + 400);
+await page.mouse.down();
+await page.mouse.move(boxEl.x + 460, boxEl.y + 430, { steps: 4 });
+await page.mouse.up();
+await page.keyboard.up('Alt');
+await page.waitForTimeout(150);
+const afterPan = await page.screenshot({ clip: { x: boxEl.x + 200, y: boxEl.y + 200, width: 120, height: 120 } });
+check('Alt+drag pans the image', Buffer.compare(beforePan, afterPan) !== 0);
+
+await page.click('#fit');
+await page.waitForTimeout(120);
+
+// --- undo: prompt points, then instance deletion ---
+await page.evaluate(() => { window.Bridge.samSegment = window.__ORIG_SEGMENT__; });
+const instBefore = await page.textContent('#count');
+await page.locator('#instances .icon.danger').first().click();
+await page.waitForTimeout(150);
+const instAfterDelete = await page.textContent('#count');
+await page.keyboard.press('Control+z');
+await page.waitForTimeout(200);
+check('Ctrl+Z restores a deleted instance',
+  Number(instAfterDelete) === Number(instBefore) - 1 &&
+  (await page.textContent('#count')) === instBefore,
+  `${instBefore} -> ${instAfterDelete} -> ${await page.textContent('#count')}`);
+
+// A prompt point is undone before any instance is.
+await page.click('[data-mode="point"]');
+await page.evaluate(() => { document.getElementById('auto').checked = false; });
+await page.mouse.click(boxEl.x + boxEl.width / 2, boxEl.y + boxEl.height / 2);
+await page.waitForTimeout(100);
+check('a queued prompt enables 実行', !(await page.locator('#segment').isDisabled()));
+await page.keyboard.press('Control+z');
+await page.waitForTimeout(150);
+check('Ctrl+Z removes the last prompt point first',
+  await page.locator('#segment').isDisabled());
+
+// --- selecting an instance links the list to the canvas ---
+await page.locator('#instances .meta').first().click();
+await page.waitForTimeout(120);
+check('clicking a row selects it', await page.evaluate(() =>
+  !!document.querySelector('#instances li.sel')));
+
+// --- discarding work asks first ---
+let asked = null;
+page.on('dialog', async (d) => { asked = d.message(); await d.dismiss(); });
+await page.click('#openImage');
+await page.waitForTimeout(300);
+check('opening another image asks before discarding instances',
+  asked !== null && asked.includes('破棄'), String(asked));
+check('dismissing the prompt keeps the current image',
+  (await page.textContent('#imageName')).includes('test_image'));
+
+// --- the panel stays reachable no matter how many instances exist ---
+await page.evaluate(() => {
+  const list = document.getElementById('instances');
+  for (let i = 0; i < 40; i++) list.appendChild(list.firstElementChild.cloneNode(true));
+});
+await page.waitForTimeout(120);
+const visible = async (sel) => {
+  const b = await page.locator(sel).boundingBox();
+  const vp = page.viewportSize();
+  return !!b && b.y >= 0 && b.y + b.height <= vp.height && b.x >= 0;
+};
+// At this window height the fixed sections plus a usable list do not both
+// fit, so the setup controls scroll rather than being clipped away. What
+// matters is that they stay reachable.
+check('the model path stays reachable with 40+ instances',
+  await (async () => {
+    await page.locator('#modelPath').scrollIntoViewIfNeeded();
+    return visible('#modelPath');
+  })());
+// Pinned to the bottom of the panel: visible even after scrolling the panel
+// to the top for the check above.
+check('the export button stays visible with 40+ instances', await visible('#export'));
+check('the instance list scrolls inside itself rather than growing the panel',
+  await page.evaluate(() => {
+    const l = document.getElementById('instances');
+    // It absorbs the spare space, keeps a usable height, and scrolls its own
+    // overflow instead of pushing the export button off the panel.
+    return l.scrollHeight > l.clientHeight && l.clientHeight >= 100 &&
+           getComputedStyle(l).overflowY === 'auto';
+  }),
+  await page.evaluate(() => {
+    const l = document.getElementById('instances');
+    return `client=${l.clientHeight} scroll=${l.scrollHeight}`;
+  }));
+
 check('no uncaught page errors', consoleErrors.length === 0, consoleErrors.join(' | '));
 
+await page.click('#fit');
+await page.waitForTimeout(150);
 await page.screenshot({ path: join(here, '..', 'evidence', 'browser-final.png'), fullPage: false });
 
 await browser.close();

@@ -53,12 +53,17 @@ something the page can choose.
    label box first if you want something other than `object`.
 5. **COCO を書き出す** downloads a COCO JSON.
 
-| key | action |
+| key / gesture | action |
 |-----|--------|
 | `Space` | run segmentation |
-| `Enter` | accept the current mask |
+| `Enter` | accept the current mask (also works while typing the label) |
+| `Ctrl+Z` | undo the last prompt point, then restore the last deleted instance |
 | `Esc` | clear the prompt |
 | wheel | zoom at the cursor |
+| `Alt`+drag, middle-drag, or 移動 mode | pan |
+
+Clicking an instance row selects it: the other masks dim and its bounding box
+is drawn. Zoom and pan survive a window resize; 全体表示 re-fits.
 
 The whole point set is re-sent on every run, because SAM conditions on all
 points at once — adding a negative point has to re-run with the earlier
@@ -78,7 +83,7 @@ COCO and CVAT.
 ```bash
 node tools/run-tests.mjs                       # 16 checks, no browser
 PLAYWRIGHT_PATH=<path-to-playwright> \
-  node tools/browser-test.mjs                  # 27 checks, headless Chromium
+  node tools/browser-test.mjs                  # 39 checks, headless Chromium
 ```
 
 The node suite covers the RLE codec (including a mask with a hole and a
@@ -87,7 +92,8 @@ decoded into the wrong pixels) and the COCO document shape.
 
 The browser suite drives the real page with `window.__TAURI__` stubbed,
 covering click → segment → accept → export, the colour/instance bookkeeping,
-the in-flight guard, and keyboard handling.
+the in-flight guard, keyboard handling, pan/zoom, undo, the discard
+confirmation, and the panel layout under 40+ instances.
 
 Both replay `fixtures/serve-point-315-250.json`, a recorded `sam3_serve` reply
 whose mask was verified pixel-for-pixel against `sam3_seg`'s PNG output. It is
@@ -96,10 +102,12 @@ vendored, so neither suite needs a model, a GPU, or anything in `/tmp`.
 ## Limits
 
 - Only point and box prompts. No brush, eraser, or polygon editing yet.
-- One image at a time; there is no project save/reload, and loading a new image
-  discards the current instances without asking.
-- No undo, and no way to remove a single prompt point — only the whole prompt.
-- No pan; a window resize resets zoom.
+- One image at a time; there is no project save/reload. Loading another image
+  discards the current instances — it asks first, and leaving the page warns,
+  but there is no recovery once confirmed.
+- Undo covers prompt points and instance deletion, not label edits.
+- Every accepted instance keeps a full-image RGBA layer, so memory grows with
+  the instance count on very large images.
 - Opened in a browser instead of Tauri, the SAM controls are disabled — there
   is no model and no filesystem there.
 - Only tested on Linux.

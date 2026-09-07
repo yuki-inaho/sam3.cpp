@@ -1,4 +1,8 @@
 :root {
+  /* Without this, native controls and the default focus ring are computed for
+     a light page and come out nearly invisible on this background. */
+  color-scheme: dark;
+
   --bg: #14171c;
   --panel: #1b1f26;
   --line: #2b313b;
@@ -33,7 +37,17 @@ html, body {
 .brand { letter-spacing: .02em; }
 .file { color: var(--muted); font-variant-numeric: tabular-nums; }
 
-.status { margin-left: auto; color: var(--muted); }
+/* The header is fixed-height, so the status text — the app's only error
+   channel — must be allowed to shrink and ellipsise instead of pushing the
+   layout out of the window. The full text stays in its title attribute. */
+.status {
+  margin-left: auto;
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .status.ok   { color: var(--ok); }
 .status.warn { color: var(--warn); }
 .status.err  { color: var(--err); }
@@ -49,13 +63,21 @@ html, body {
   background: var(--panel);
   border-right: 1px solid var(--line);
   padding: 12px;
+  /* The instance list absorbs the spare space and scrolls inside itself, so
+     the model path above it and the export button below it stay put however
+     many instances exist. The panel only scrolls as a last resort, when the
+     window is too short for even the fixed sections — clipping them with
+     overflow:hidden would make them unreachable. */
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
-.panel section { display: flex; flex-direction: column; gap: 8px; }
-.panel .grow { flex: 1; min-height: 120px; }
+.panel section { display: flex; flex-direction: column; gap: 8px; flex: 0 0 auto; }
+/* The list scrolls inside itself; otherwise the panel scrolls and the export
+   button slides off the bottom once there are a few instances. */
+.panel .grow { flex: 1 1 auto; min-height: 140px; overflow: hidden; }
+.panel .grow .instances { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
 
 h2 {
   margin: 0;
@@ -86,6 +108,7 @@ button, input {
 }
 button { cursor: pointer; }
 button:hover:not(:disabled) { border-color: #3d4757; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 button:disabled { opacity: .45; cursor: default; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #0b1620; font-weight: 600; }
 button.ghost { background: transparent; }
@@ -115,7 +138,9 @@ kbd {
 .chip { padding: 3px 8px; font-size: 12px; }
 
 .instances { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.instances li { display: flex; align-items: center; gap: 6px; }
+.instances li { display: flex; align-items: center; gap: 6px; padding: 2px; border-radius: 5px; }
+.instances li.sel { background: #232935; outline: 1px solid var(--accent); }
+.instances li:hover { background: #1f2530; }
 .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
 .instances .name { flex: 1; min-width: 0; padding: 3px 6px; }
 .instances .meta { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -125,3 +150,31 @@ kbd {
 .stage { position: relative; overflow: hidden; background: #0e1116; }
 #canvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
 body.busy #canvas { cursor: progress; }
+
+/* Browser (non-Tauri) fallback: say why the controls are dead instead of
+   leaving a panel of disabled buttons with no explanation. */
+.browser-note { display: none; }
+body.browser .browser-note {
+  display: block;
+  position: absolute;
+  inset: 24px;
+  height: fit-content;
+  margin: 0;
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  color: var(--fg);
+}
+body.busy .panel button:disabled { opacity: .35; }
+
+/* The export button is the primary output action; pin it to the bottom of the
+   panel so it never scrolls out of reach, whatever the instance count. */
+.panel .footer {
+  position: sticky;
+  bottom: -12px;
+  padding: 8px 0 4px;
+  margin-bottom: -4px;
+  background: var(--panel);
+  box-shadow: 0 -8px 12px -8px rgba(0, 0, 0, .8);
+}
