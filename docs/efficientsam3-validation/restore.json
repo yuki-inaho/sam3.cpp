@@ -1,0 +1,31 @@
+{
+  "passed": true,
+  "source_archive_manifests": {
+    "sam3cpp-efficient": {
+      "files_verified": 2143
+    },
+    "sam3-onnx-efficient": {
+      "files_verified": 87
+    }
+  },
+  "all_tar_owner_fields_cleared": true,
+  "zstd_integrity_passed": true,
+  "gguf_restored_byte_exact": true,
+  "default_conversion_repeated_byte_exact": true,
+  "gguf_sha256": "f78a2dec600b03ecc1a2b2609f921eaefac6c1d98e51e70e0a72804798b78913",
+  "restored_build": {
+    "SAM3_BUILD_SAM31": "OFF",
+    "GGML_NATIVE": "OFF",
+    "target": "efficientsam3"
+  },
+  "restored_inference": {
+    "backend": "ggml-cpu",
+    "path": "/NO_EXECUTABLES",
+    "detections": 1,
+    "mask_iou_vs_checkout": 1.0
+  },
+  "restored_onnx_tests": {
+    "passed": 15,
+    "skipped": 1
+  }
+}

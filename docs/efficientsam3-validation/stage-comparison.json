@@ -1,0 +1,25 @@
+{
+  "passed": true,
+  "same_normalized_chw_input": true,
+  "reference": "ORT CPU",
+  "differences": {
+    "fpn0": {
+      "max_absolute_error": 0.00011910498142242432,
+      "mean_absolute_error": 7.1400017986889e-06
+    },
+    "fpn1": {
+      "max_absolute_error": 0.0017101764678955078,
+      "mean_absolute_error": 0.00018550649110693485
+    },
+    "fpn2": {
+      "max_absolute_error": 2.1457672119140625e-05,
+      "mean_absolute_error": 1.1988131518592127e-06
+    },
+    "text": {
+      "max_absolute_error": 2.592802047729492e-06,
+      "mean_absolute_error": 2.429892731470318e-07
+    }
+  },
+  "final_mask_iou": 0.9999931836462039,
+  "threads": 4
+}

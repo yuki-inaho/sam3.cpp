@@ -7,6 +7,7 @@
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
 #include "ggml.h"
+#include "gguf.h"
 
 #ifdef GGML_USE_METAL
 #include "ggml-metal.h"
@@ -38,7 +39,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <thread>
 #include <unordered_map>
@@ -189,6 +192,7 @@ struct sam3_hparams {
 
     // ── EdgeTAM derived helpers ────────────────────────────────────────
     bool is_edgetam() const { return model_type == SAM3_MODEL_EDGETAM; }
+    bool is_efficient() const { return model_type == SAM3_MODEL_EFFICIENTSAM3; }
 
     int32_t edgetam_feat_size() const { return img_size / 16; }  // 1024/16 = 64
 
@@ -2527,6 +2531,7 @@ static void sam3_register_tensors(sam3_model& model) {
     const int H = hp.n_img_embd();       // 72
 
     // ── ViT backbone ─────────────────────────────────────────────────────
+    if (!hp.is_efficient()) {
     model.vit.blocks.resize(hp.vit_depth);
 
     model.vit.patch_embed_w = T4("vit.patch_embed.proj.weight", hp.patch_size, hp.patch_size, 3, E);
@@ -2561,6 +2566,7 @@ static void sam3_register_tensors(sam3_model& model) {
         blk.freqs_cis = T3f(p + ".attn.freqs_cis", 2, 32, rope_n);
     }
 
+    } // EfficientSAM3 has its own student trunk.
     // ── Neck (detector + tracker) ────────────────────────────────────────
     // ggml weight layout: conv2d [kW, kH, Cin, Cout], conv_transpose [kW, kH, Cout, Cin]
     auto register_neck = [&](sam3_neck& neck, const std::string& prefix) {
@@ -2597,7 +2603,7 @@ static void sam3_register_tensors(sam3_model& model) {
     if (!hp.visual_only) {
         register_neck(model.neck_det, "neck.det.");
     }
-    register_neck(model.neck_trk, "neck.trk.");
+    if (!hp.is_efficient()) register_neck(model.neck_trk, "neck.trk.");
 
     // Helper lambdas used by multiple sections (detector + tracker)
     auto reg = [&](const std::string& n, int64_t d0, int64_t d1, bool is_f32 = false) {
@@ -2625,6 +2631,7 @@ static void sam3_register_tensors(sam3_model& model) {
     if (!hp.visual_only) {
 
     // ── Text encoder ─────────────────────────────────────────────────────
+    if (!hp.is_efficient()) {
     model.text_enc.blocks.resize(hp.text_layers);
     model.text_enc.token_embed_w = T2f("text.token_embed.weight", TW, hp.text_vocab_size);
     model.text_enc.pos_embed = T2f("text.pos_embed", TW, hp.text_ctx_len);
@@ -2652,6 +2659,7 @@ static void sam3_register_tensors(sam3_model& model) {
         blk.mlp_fc2_b = T1f(p + ".mlp.fc2.bias", TW);
     }
 
+    } // MobileCLIP-S0 is registered from the fixed GGUF tensor contract.
     // ── Fusion encoder ───────────────────────────────────────────────────
     model.fenc.layers.resize(hp.fenc_layers);
     for (int i = 0; i < hp.fenc_layers; ++i) {
@@ -2880,6 +2888,8 @@ static void sam3_register_tensors(sam3_model& model) {
     reg1("seg.semantic_seg_head.bias", 1);
 
     } // end if (!hp.visual_only) — detector-only tensors
+
+    if (hp.is_efficient()) return; // Released EV-M has no SAM/memory tracker.
 
     // ── SAM prompt encoder ───────────────────────────────────────────────
     model.sam_pe.pe_gaussian = T2f("sam_pe.pe_gaussian", 2, 128);
@@ -3201,6 +3211,8 @@ static bool sam3_load_tensors(std::ifstream& fin, sam3_model& model, int n_tenso
 ** Model loading — public API
 *****************************************************************************/
 
+#include "efficientsam3/load.inc"
+
 std::shared_ptr<sam3_model> sam3_load_model(const sam3_params& params) {
     fprintf(stderr, "%s: loading model from '%s'\n", __func__, params.model_path.c_str());
 
@@ -3209,6 +3221,15 @@ std::shared_ptr<sam3_model> sam3_load_model(const sam3_params& params) {
         fprintf(stderr, "%s: failed to open '%s'\n", __func__, params.model_path.c_str());
         return nullptr;
     }
+
+    char file_magic[4] = {};
+    fin.read(file_magic, 4);
+    if (!fin) {
+        fprintf(stderr, "%s: truncated model header\n", __func__);
+        return nullptr;
+    }
+    fin.seekg(0);
+    if (std::memcmp(file_magic, "GGUF", 4) == 0) return sam3_load_efficient_gguf(params);
 
     // ── Read + validate header ───────────────────────────────────────────
     uint32_t magic;
@@ -6025,6 +6046,14 @@ static bool sam2_encode_image_hiera(sam3_state& state,
 ** Image backbone — public API
 *****************************************************************************/
 
+#include "efficientsam3/native.inc"
+
+bool sam3_encode_efficient_from_preprocessed(sam3_state & state, const sam3_model & model,
+        const float * chw, int original_width, int original_height) {
+    if (!model.hparams.is_efficient() || !chw || original_width <= 0 || original_height <= 0) return false;
+    return sam3_efficient_encode(state, model, chw, original_width, original_height);
+}
+
 bool sam3_encode_image(sam3_state& state,
                        const sam3_model& model,
                        const sam3_image& image) {
@@ -6036,6 +6065,12 @@ bool sam3_encode_image(sam3_state& state,
     // ── SAM2 dispatch ────────────────────────────────────────────────────
     if (model.hparams.is_sam2()) {
         return sam2_encode_image_hiera(state, model, image);
+    }
+    if (model.hparams.is_efficient()) {
+        if (state.encode_img_size != 1008 || image.width <= 0 || image.height <= 0 ||
+            image.channels != 3 || image.data.size() != (size_t)image.width * image.height * 3) return false;
+        auto input = sam3_preprocess_image(image, 1008);
+        return sam3_efficient_encode(state, model, input.data(), image.width, image.height);
     }
 
 #if SAM3_LOG_LEVEL >= 1
@@ -7005,10 +7040,16 @@ bool sam3_encode_image_from_preprocessed(sam3_state& state,
     auto t_start = std::chrono::high_resolution_clock::now();
     const auto& hp = model.hparams;
 
+    if (!chw_data) return false;
+
     if (img_size != hp.img_size) {
         fprintf(stderr, "%s: img_size mismatch: got %d, expected %d\n",
                 __func__, img_size, hp.img_size);
         return false;
+    }
+
+    if (hp.is_efficient()) {
+        return sam3_encode_efficient_from_preprocessed(state, model, chw_data, img_size, img_size);
     }
 
     fprintf(stderr, "%s: encoding from preprocessed %dx%d\n", __func__, img_size, img_size);
@@ -9755,7 +9796,9 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     ** ── SUB-GRAPH 1: Text Encoder ────────────────────────────────────
     */
     std::vector<float> text_feats_cpu(D * L);
-    {
+    if (hp.is_efficient()) {
+        if (!sam3_efficient_text(model, state.n_threads, token_ids, text_feats_cpu)) return result;
+    } else {
         const size_t sz = ggml_tensor_overhead() * 16384 + ggml_graph_overhead() * 2;
         struct ggml_init_params gp = {sz, nullptr, true};
         auto* ctx = ggml_init(gp);
@@ -10765,6 +10808,10 @@ static sam3_dec_result sam3_build_sam_dec_graph(
 sam3_result sam3_segment_pvs(sam3_state& state,
                              const sam3_model& model,
                              const sam3_pvs_params& params) {
+    if (model.hparams.is_efficient()) {
+        fprintf(stderr, "EV-M checkpoint has no SAM interactive decoder; use PCS text prompts\n");
+        return sam3_result{};
+    }
 #if SAM3_LOG_LEVEL >= 1
     auto t_start = std::chrono::high_resolution_clock::now();
 #endif
@@ -11735,6 +11782,10 @@ static void sam3_store_obj_ptr(
 
 sam3_tracker_ptr sam3_create_tracker(const sam3_model& model,
                                      const sam3_video_params& params) {
+    if (model.hparams.is_efficient()) {
+        fprintf(stderr, "EV-M checkpoint has no memory tracker; use independent frame detection\n");
+        return nullptr;
+    }
     if (model.hparams.is_sam2()) {
         fprintf(stderr, "%s: ERROR: text-prompted tracker not available for SAM2 "
                 "(use sam3_create_visual_tracker instead)\n", __func__);
@@ -12116,6 +12167,10 @@ void sam3_tracker_reset(sam3_tracker& tracker) {
 sam3_tracker_ptr sam3_create_visual_tracker(
         const sam3_model& model,
         const sam3_visual_track_params& params) {
+    if (model.hparams.is_efficient()) {
+        fprintf(stderr, "%s: EV-M checkpoint has no memory tracker weights\n", __func__);
+        return nullptr;
+    }
     sam3_video_params vp;
     vp.text_prompt          = "";  // no PCS detection
     vp.assoc_iou_threshold  = params.assoc_iou_threshold;

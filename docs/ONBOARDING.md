@@ -215,3 +215,7 @@ cmake -B build -DSAM3_BUILD_TESTS=ON
 ## SAM 3.1 native CPU / ConvRot GGUF
 
 SAM 3.1の取得・uv環境・無損失GGUF変換・C++ビルド・画像/連続画像annotation・smoke検証は [SAM31_GUIDE.ja.md](SAM31_GUIDE.ja.md) にまとめています。既存SAM3とは別targetで、モデル重み・トークン・ローカル認証情報をGitへ含めません。
+# EfficientSAM3 EV-M
+
+公開EV-MをCPU専用uv環境で取得・GGUF変換し、native C++/ggmlの画像・画像列annotationを実行できる。
+一貫した取得→変換→build→CLI→E2E手順は [EfficientSAM3 guide](EFFICIENTSAM3.md) を参照する。

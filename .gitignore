@@ -64,6 +64,8 @@ tools/annotator/node_modules/
 
 # SAM 3.1 generated artifacts and Python environment
 sam31/.venv/
+efficientsam3/.venv/
+outputs/
 evidence/
 *.safetensors
 *.gguf
