@@ -60,6 +60,7 @@ F32重みを保存し、CPU用F32 depthwise kernelを使用する。BatchNormの
 ```sh
 uv run --project efficientsam3 pytest tests/test_efficientsam3_conversion.py tests/test_efficient_cli.py -q
 uv run --project efficientsam3 python efficientsam3/e2e.py
+EFFICIENTSAM3_REAL=1 uv run --project efficientsam3 pytest tests/test_efficient_e2e.py -q
 ```
 
 モデル無し検査は不正GGUF、数値引数、変換境界を検査する。実モデルE2Eは公開dog画像を1008へ前処理し、人工的に移動した6フレームを通常CLIで推論する。
@@ -71,3 +72,27 @@ uv run --project efficientsam3 python efficientsam3/e2e.py
 通常の画像入力はstb decodeとC++ bilinear resizeを使う。ORT側Pillow resizeとの前処理差をモデル演算誤差と混同しない。
 
 同モデルのONNX export/runtimeは [sam3-video-tracking-onnx-export](https://github.com/yuki-inaho/sam3-video-tracking-onnx-export) の `docs/EFFICIENTSAM3.md` を参照する。モデル/source/context/前処理/sequence_modeの対応を上記と統一している。
+
+## 実測結果（2026-10-01）
+
+- [変換照合](efficientsam3-validation/conversion.json)：799 tensors / 389,822,768 payload bytesが完全一致。
+- [native E2E](efficientsam3-validation/native-e2e.json)：同一プロセスの6フレームで最小mask IoU **0.999962**、約10.88–12.16秒/フレーム（16threads）。
+- [同じCHW入力でのstage比較](efficientsam3-validation/stage-comparison.json)：text最大誤差0.0000026、最終mask IoU **0.999993**。
+- [性能記録](efficientsam3-validation/performance.json)：同じ1フレームを16threadsで10.95秒、4threadsで9.75秒。両PNGはbyte一致。各条件1回の計測であり、性能保証ではない。
+
+公開dog画像とその人工的な移動を検証入力に使用した。モデル無しの境界検査は12件、既存SAM31のCTestは5グループ成功。
+LiteMLAのgrouped projectionをbatched GEMMへ変更した案は実測が遅く、採用しなかった。
+
+## zstd sourceの作成と検査
+
+Gitで追跡したsource/docs/testのみを、利用者名を含まないtar headerと相対SHA256一覧へ梱包する。
+models、build、outputs、環境cacheはsource archiveへ含めない。
+
+```sh
+uv run --project efficientsam3 python scripts/package_efficientsam3.py --name sam3cpp-efficient --output dist/sam3cpp_efficientsam3_source.tar.zst
+zstd -t dist/sam3cpp_efficientsam3_source.tar.zst
+mkdir -p restore
+tar --zstd -xf dist/sam3cpp_efficientsam3_source.tar.zst -C restore
+(cd restore/sam3cpp-efficient && sha256sum -c FILES.sha256)
+zstd -T4 -3 models/efficientsam3_ev_m.gguf -o dist/efficientsam3_ev_m.gguf.zst
+```
