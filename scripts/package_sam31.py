@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix='sam31-package-') as directory:
         shutil.copyfile(src, dst)
         shutil.copymode(src, dst)
     for src in sorted((root / 'evidence').rglob('*')):
-        if not src.is_file() or any(part.startswith('.') for part in src.relative_to(root / 'evidence').parts):
+        if src.is_symlink() or not src.is_file() or any(part.startswith('.') for part in src.relative_to(root / 'evidence').parts):
             continue
         dst = stage / src.relative_to(root)
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -54,8 +54,15 @@ with tempfile.TemporaryDirectory(prefix='sam31-package-') as directory:
             manifest.append(hashlib.sha256(src.read_bytes()).hexdigest() + '  ' + str(src.relative_to(stage)))
     (stage / 'FILES.sha256').write_text('\n'.join(manifest)+'\n')
     archive = Path(directory) / 'source.tar'
+    def public_header(info):
+        info.uid = info.gid = 0
+        info.uname = info.gname = ''
+        info.mtime = 0
+        info.pax_headers = {}
+        return info
+
     with tarfile.open(archive, 'w') as tar:
-        tar.add(stage, arcname='sam3cpp-sam31')
+        tar.add(stage, arcname='sam3cpp-sam31', filter=public_header)
     target = root / 'dist/sam3cpp_sam31_source.tar.zst'
     target.parent.mkdir(exist_ok=True)
     subprocess.run(['zstd', '-T4', '-3', '-f', str(archive), '-o', str(target)], check=True)
