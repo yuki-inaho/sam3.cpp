@@ -1,0 +1,17 @@
+{
+  "input": "models/sam3.1_multiplex_convrot_int8.safetensors",
+  "output": "models/sam3.1_multiplex_convrot_int8.gguf",
+  "source_sha256": "21fc2308ef4bf82a1d372e147170e2d48ed8f3688922b4eaa3e341828333debd",
+  "gguf_sha256": "e59728d18a3e0f6bfd603eee86490b6116b9141d4e4cd3acdc0309ea443ec370",
+  "tensor_count": 3136,
+  "int8_layers": 651,
+  "convrot_layers": 647,
+  "bytes": 908243392,
+  "test_fixture": false,
+  "numerical_requantization": false,
+  "roundtrip": {
+    "exact": true,
+    "tensors": 3136,
+    "bytes": 906735111
+  }
+}

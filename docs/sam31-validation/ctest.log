@@ -1,0 +1,16 @@
+Internal ctest changing into directory: build
+Test project build
+    Start 1: sam31_native_quant
+1/5 Test #1: sam31_native_quant ...............   Passed    0.01 sec
+    Start 2: sam31_native_graph
+2/5 Test #2: sam31_native_graph ...............   Passed    0.42 sec
+    Start 3: sam31_native_operators
+3/5 Test #3: sam31_native_operators ...........   Passed    0.07 sec
+    Start 4: sam31_native_cli
+4/5 Test #4: sam31_native_cli .................   Passed    1.78 sec
+    Start 5: sam31_storage_unit_tests
+5/5 Test #5: sam31_storage_unit_tests .........   Passed    0.93 sec
+
+100% tests passed, 0 tests failed out of 5
+
+Total Test time (real) =   3.21 sec

@@ -1,0 +1,3 @@
+# Converter and tests; PyTorch is not required.
+numpy>=1.26
+Pillow>=10

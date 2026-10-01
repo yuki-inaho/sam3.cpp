@@ -61,3 +61,11 @@ output/
 tools/annotator/src-tauri/target/
 tools/annotator/src-tauri/gen/
 tools/annotator/node_modules/
+
+# SAM 3.1 generated artifacts and Python environment
+sam31/.venv/
+evidence/
+*.safetensors
+*.gguf
+!sam31/fixtures/TEST_ONLY*.safetensors
+!sam31/fixtures/TEST_ONLY*.gguf

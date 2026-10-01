@@ -1,0 +1,49 @@
+{
+  "request_complete": true,
+  "native_image_passed": true,
+  "native_video_passed": true,
+  "reference_e2e_passed": false,
+  "reference_e2e_required": false,
+  "official_output_parity_verified": false,
+  "real_checkpoint": {
+    "repo": "ussoewwin/SAM3.1-ConvRot-INT8",
+    "revision": "32c74f1ec2a9b615ddb9346d2155a999296c23b7",
+    "sha256": "21fc2308ef4bf82a1d372e147170e2d48ed8f3688922b4eaa3e341828333debd",
+    "hf_lfs_identity_matched": true
+  },
+  "conversion": {
+    "tensor_count": 3136,
+    "payload_bytes": 906735111,
+    "exact": true,
+    "requantized": false,
+    "gguf_sha256": "e59728d18a3e0f6bfd603eee86490b6116b9141d4e4cd3acdc0309ea443ec370"
+  },
+  "image": {
+    "frames": 1,
+    "objects": 2,
+    "minimum_iou": 1.0,
+    "elapsed_ms": 43874.784661
+  },
+  "video": {
+    "frames": 6,
+    "objects": 2,
+    "masks": 12,
+    "minimum_iou": 1.0,
+    "elapsed_ms": 312019.321305,
+    "used_tensors": 867,
+    "memory_attention": 5,
+    "memory_blocks": 20
+  },
+  "ctest": {
+    "groups": 5,
+    "passed": 5
+  },
+  "bundle_restoration_passed": true,
+  "scope": "point prompted native C++ CPU image and forward video, synthetic scene smoke only",
+  "restoration": {
+    "source_files_checked": 2194,
+    "fresh_release_build": true,
+    "fixture_image_video_smoke_passed": true,
+    "decompressed_gguf_sha256_matched": true
+  }
+}

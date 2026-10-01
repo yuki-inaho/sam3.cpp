@@ -1,0 +1,9 @@
+[project]
+name = "sam31-gguf-tools"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26,<3", "Pillow>=10,<13", "pytest>=8,<10"]
+
+[tool.pytest.ini_options]
+pythonpath = ["python", "tools"]
+testpaths = ["tests"]
