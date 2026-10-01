@@ -147,3 +147,31 @@ zstd -d ../sam3.1_multiplex_convrot_int8.gguf.zst \
 | 回帰 | CTest全5グループ成功、実checkpoint aliases/INT8 embeddingも検査 |
 
 CPU16 threads・CBLAS・1008×1008内部解像度での一回の実測です。予測画像は [動画overlay](sam31-validation/real-video-overlay.png)、数値検証は [画像](sam31-validation/real-image-validation.json) と [動画](sam31-validation/real-video-validation.json) を参照してください。`quality` は復号器の生出力で、確率 [0,1] として解釈しません。
+
+## 実重み E2E と計測
+
+画像・動画を続けて検証する runner を追加しました。固定GGUFの全ファイルSHA-256を確認し、C++で人工入力を生成→画像分割→6フレーム追跡→独立IoU判定を実行します。Python最適化モードでも検証は無効になりません。失敗はnonzeroで終了し、途中ログは指定した出力先に残ります。
+
+```sh
+uv run --project sam31 python sam31/tools/run_native_e2e.py \
+  --binary build/sam31/sam31 \
+  --model models/sam3.1_multiplex_convrot_int8.gguf \
+  --threads 16 --output runs/native-e2e
+```
+
+CTestに登録する場合は明示的にモデルを指定します。重みを指定しない通常のCTestは高速な回帰5グループだけです。
+
+```sh
+cmake -S . -B build \
+  -DSAM31_E2E_MODEL=models/sam3.1_multiplex_convrot_int8.gguf
+ctest --test-dir build -L real --output-on-failure
+ctest --test-dir build -LE real --output-on-failure
+```
+
+CLIの `--profile` は `report.json` の `stats.operator_timings` にlinear/conv/deconv/attention/normの経過時間を記録します。全体の時間には活性化・補間・重み復元・入出力も含まれるため、各項目の合計は全体と一致しません。CBLASとOpenMPのスレッド数は独立で、実測では両方16を使用しています。`--threads` はOpenMP、`OPENBLAS_NUM_THREADS` はOpenBLASを制御します。
+
+複数点指定では、安定したsingle-mask token 0を使用し、不安定なら候補1～3の品質最大へ切り替えます。以前の版は常に候補1～3を選んでいたため、正例・負例の追加点を使う経路を修正しました。stable/unstableと1点/複数点を、制御fixtureのCLI E2Eで検査します。
+
+GELUは元のerf式、LayerNormは元の行内加算順を維持して独立した値・行をOpenMPで並列化しました。同じモデル・入力・16スレッドの画像実測で44.872秒→35.354秒（21.2%短縮）、出力logitsはバイト単位で一致しました。これはこの環境での一回の比較で、他環境の速度保証ではありません。
+
+ソースの再梱包はGit checkoutで変更をstage/commitしてから `uv run --project sam31 python scripts/package_sam31.py` を実行します。Gitへ追跡したファイルだけを収集します。提出アーカイブからの再梱包では同梱 `FILES.sha256` をファイル一覧として使用するため、`.git` は不要です。

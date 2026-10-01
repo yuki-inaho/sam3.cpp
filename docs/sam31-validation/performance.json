@@ -1,0 +1,26 @@
+{
+  "baseline_ms": 44871.802285,
+  "optimized_ms": 35353.529995,
+  "reduction_percent": 21.21214617042878,
+  "logits_byte_exact": true,
+  "threads": 16,
+  "blas_threads": 16,
+  "changes": [
+    "exact GELU parallel elementwise",
+    "LayerNorm parallel independent rows"
+  ],
+  "baseline_profile": {
+    "attention_ms": 13147.209016999997,
+    "conv_ms": 3074.8740100000005,
+    "deconv_ms": 993.6544230000001,
+    "linear_ms": 10861.085633000002,
+    "norm_ms": 2243.1998620000004
+  },
+  "optimized_profile": {
+    "attention_ms": 12642.972624000007,
+    "conv_ms": 3244.8199479999994,
+    "deconv_ms": 1013.5704059999998,
+    "linear_ms": 11415.818708,
+    "norm_ms": 580.1694330000003
+  }
+}

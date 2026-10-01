@@ -76,5 +76,13 @@ if(SAM31_BUILD_TESTS)
         add_test(NAME sam31_storage_unit_tests COMMAND ${CMAKE_COMMAND} -E env
             "SAM31_BINARY=$<TARGET_FILE:sam31>" "SAM31_QUANT_LIBRARY=$<TARGET_FILE:sam31_quant>" "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python"
             ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/tests -p test_*.py -v)
+        set(SAM31_E2E_MODEL "" CACHE FILEPATH "Optional trained GGUF for native image/video E2E")
+        if(SAM31_E2E_MODEL)
+            get_filename_component(SAM31_E2E_MODEL_ABSOLUTE "${SAM31_E2E_MODEL}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+            add_test(NAME sam31_native_real_e2e COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/run_native_e2e.py
+                --binary $<TARGET_FILE:sam31> --model ${SAM31_E2E_MODEL_ABSOLUTE})
+            set_tests_properties(sam31_native_real_e2e PROPERTIES LABELS "real;e2e" TIMEOUT 3600)
+        endif()
     endif()
 endif()

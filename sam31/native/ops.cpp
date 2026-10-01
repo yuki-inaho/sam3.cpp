@@ -62,7 +62,14 @@ namespace sam31 {
             return out;
         }
         Tensor gelu(Tensor x) {
-            for(float&v:x.v)v=0.5f*v*(1.0f+std::erf(v*0.7071067811865475244f));
+            // Each value is independent; preserve the exact erf expression.
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(x.v.size() >= 65536)
+#endif
+            for(size_t i=0; i<x.v.size(); ++i) {
+                const float value=x.v[i];
+                x.v[i]=0.5f*value*(1.0f+std::erf(value*0.7071067811865475244f));
+            }
             return x;
         }
         Tensor relu(Tensor x) {
@@ -193,6 +200,7 @@ namespace sam31 {
             return out;
         }
         Tensor Ops::linear(const Tensor&x,const std::string&p,bool bias) {
+            OperatorTimer timer(calls.profile,calls.linear_ms);
             ++calls.linear;
             auto w=weights.get(p+".weight");
             require(w->shape.size()==2&&w->shape[1]==x.c,"linear shape: "+p);
@@ -202,9 +210,13 @@ namespace sam31 {
             return out;
         }
         Tensor Ops::norm(const Tensor&x,const std::string&p,float eps) {
+            OperatorTimer timer(calls.profile,calls.norm_ms);
             auto w=weights.get(p+".weight"),b=weights.get(p+".bias");
             require(w->v.size()==x.c&&b->v.size()==x.c,"norm shape: "+p);
             Tensor out(x.h,x.w,x.c);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(x.v.size() >= 65536)
+#endif
             for(size_t n=0; n<x.rows(); ++n) {
                 double mean=0,var=0;
                 for(size_t c=0; c<x.c; ++c)mean+=x.row(n)[c];
@@ -219,6 +231,7 @@ namespace sam31 {
             return out;
         }
         Tensor Ops::conv(const Tensor&x,const std::string&p,size_t stride,size_t pad,bool bias,bool depthwise) {
+            OperatorTimer timer(calls.profile,calls.conv_ms);
             ++calls.conv;
             auto w=weights.get(p+".weight");
             require(w->shape.size()==4,"conv rank: "+p);
@@ -258,6 +271,7 @@ namespace sam31 {
             return out;
         }
         Tensor Ops::deconv(const Tensor&x,const std::string&p) {
+            OperatorTimer timer(calls.profile,calls.deconv_ms);
             ++calls.deconv;
             auto w=weights.get(p+".weight");
             require(w->shape.size()==4&&w->shape[0]==x.c&&w->shape[2]==2&&w->shape[3]==2,"stride-two deconv shape: "+p);

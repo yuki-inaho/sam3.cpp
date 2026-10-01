@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <deque>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <set>
@@ -113,7 +114,19 @@ namespace sam31 {
         struct Counters {
             size_t image_encoder=0,interactive_head=0,multiplex_head=0,memory_encoder=0,memory_attention=0;
             size_t linear=0,conv=0,deconv=0,sdpa=0,vit_blocks=0,two_way_blocks=0,memory_blocks=0;
+            bool profile=false;
+            double linear_ms=0,conv_ms=0,deconv_ms=0,attention_ms=0,norm_ms=0;
             Json json()const;
+        };
+        struct OperatorTimer {
+            double* total;
+            std::chrono::steady_clock::time_point start;
+            OperatorTimer(bool enabled,double&sum):total(enabled?&sum:nullptr) {
+                if(total)start=std::chrono::steady_clock::now();
+            }
+            ~OperatorTimer() {
+                if(total)*total+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+            }
         };
         Tensor add(Tensor x,const Tensor&y,float scale=1);
         Tensor add_vector(Tensor x,const std::vector<float>&v,float scale=1);
@@ -139,6 +152,7 @@ namespace sam31 {
             Tensor mlp(Tensor x,const std::string&p,size_t layers=3);
             Tensor projected_attention(const Tensor&q,const Tensor&k,const Tensor&v,const std::string&p,size_t heads);
             Tensor sdpa(const Tensor&q,const Tensor&k,const Tensor&v,size_t heads) {
+                OperatorTimer timer(calls.profile,calls.attention_ms);
                 ++calls.sdpa;
                 return attention(q,k,v,heads);
             }

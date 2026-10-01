@@ -8,7 +8,21 @@ import tempfile
 import tarfile
 
 root = Path(__file__).resolve().parents[1]
-files = subprocess.check_output(['git', 'ls-files', '-co', '--exclude-standard', '-z'], cwd=root).decode().split('\0')
+if (root / '.git').exists():
+    # Include staged/tracked sources only; local notes and credentials are not sources.
+    files = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().split('\0')
+else:
+    # A delivered source archive has no Git metadata. Its verified file manifest
+    # supplies the same source list without collecting unrelated local files.
+    manifest = root / 'FILES.sha256'
+    if not manifest.is_file():
+        raise SystemExit('Packaging requires a Git checkout or delivery FILES.sha256')
+    files = []
+    for line in manifest.read_text().splitlines():
+        digest, name = line.split('  ', 1)
+        if len(digest) != 64 or Path(name).is_absolute() or '..' in Path(name).parts:
+            raise SystemExit('Invalid path in delivery manifest')
+        files.append(name)
 with tempfile.TemporaryDirectory(prefix='sam31-package-') as directory:
     stage = Path(directory) / 'sam3cpp-sam31'
     stage.mkdir()
