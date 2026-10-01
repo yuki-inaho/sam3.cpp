@@ -38,7 +38,7 @@
 
 ## 実装後の再レビュー（2026-10-01）
 
-**Verdict:** PASS（手順19/20は公開と整理の実行待ち）
+**Verdict:** PASS（D1–D5達成）
 
 - 必須799 tensorのstrict検査と全payload照合、実ONNX/native画像・6frame比較、有限値、入力依存、frame0再現、計測、復元buildを確認した。
 - nativeはgraph分離、CPU vector受け渡し、PVS/両tracker拒否、既存API dispatchを確認。拒否漏れとエラー時解放順を修正した。
@@ -47,4 +47,4 @@
 - work logを第7章に集約し、途中のred/import failureと未完了の公開項目を残した。各DoDの証跡はdocs/efficientsam3-validationに追跡できる。
 - source archiveのtar uid/gid/利用者名を消去し、tokens/cache/元checkpoint trainer metadataを含めていない。
 
-**Residual Findings:** mandatory CI contextsは両対象branchに無い。ローカルの実モデルゲートを使用する。公開/整理後に手順19/20とD5を更新する。
+**Residual Findings:** mandatory CI contextsは両対象branchに無い。ローカルの実モデルゲートを使用する。PR#3/#5のmerged状態とstaging整理・pruneを確認し、手順19/20とD5を更新した。checkoutの終了処理は提出先cleanup.jsonへ記録する。
