@@ -66,10 +66,10 @@
 
 ### 手順6: 回帰と納品
 
-- [ ] 🖐 操作: 全回帰とE2E、guide/evidence更新、commit/push/PR merge、zstd更新。
-- [ ] 🔎 確認: 書かれた結果が新しい実行証跡と一致、秘密・環境cache・実重みをGitに含めない。
-- [ ] 🧪 テスト: zstd/SHA/展開manifest、作業書のDoD監査。
-- [ ] 🛠 エラー時対処: 未証明項目は未完了のまま継続。
+- [x] 🖐 操作: 全回帰とE2E、guide/evidence更新、commit/push/PR merge、zstd更新。
+- [x] 🔎 確認: 書かれた結果が新しい実行証跡と一致、秘密・環境cache・実重みをGitに含めない。
+- [x] 🧪 テスト: zstd/SHA/展開manifest、作業書のDoD監査。
+- [x] 🛠 エラー時対処: 未証明項目は未完了のまま継続。
 
 ## 4. 使用コマンド
 
@@ -87,7 +87,7 @@ CLI testはSAM31_BINARYを絶対パスで指定。E2E runnerのoptionは手順4�
 - [x] D1: mask選択の公式差を修正しstable/unstable・1点/複数点E2E成功。
 - [x] D2: 学習済みGGUFで全14 masks、IoU>=0.8、finite、stable IDs、memory20 blocks。
 - [x] D3: 同条件の計測で画像20%以上短縮、品質維持、実行時間・設定を記録。
-- [ ] D4: CTest全成功、guide/evidence/PR/成果物一致、checksum成功。
+- [x] D4: CTest全成功、guide/evidence/PR/成果物一致、checksum成功。
 
 ## 7. 作業記録
 
@@ -114,3 +114,9 @@ PASS。TR1..4とD1..4を対応付け、E2E real/fixtureを明示。公式完全�
 | 2026-10-01 09:49:16 JST+0900 | 手順4/5 E2E完了 | real GGUF SHA確認、全14 masks IoU1.0、image34965ms/video250482ms、memory20 blocks。 |
 
 | 2026-10-01 09:49:28 JST+0900 | 手順6検査完了・公開準備 | CTest5/5、実E2E成功、source展開SHA照合、.gitなしの再梱包も2285 files成功。公開結果は実行後に追記。 |
+
+| 2026-10-01 09:51:30 JST+0900 | 手順6公開完了 | commit 1e500cf push、PR#2 develop merge済み。全D1..D4達成。 |
+
+## 追加作業：EfficientSAM3 EV-M
+
+ユーザー追加要求により、SAM31 の完了後は ONNX と C++/ggml 両リポジトリで EfficientSAM3 EV-M を対応する。実重みの構成確認から始め、画像・複数画像の実モデル比較、再現手順、commit/push/PR/merge までを続ける。詳細の正本は [EfficientSAM3 作業計画書](workdoc_Oct01-2026_efficientsam3_ev_m.md)。write-workdoc-uv と review-written-workdoc を適用し、今回の未完了を SAM31 完了状態と混同しない。
