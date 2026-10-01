@@ -1,221 +1,212 @@
-# LLMオンボーディングサマリー
+# sam3.cpp 開発オンボーディング
 
-> 新任 LLM エージェントが `sam3.cpp` に参加する際の初期資料。
-> 記載事実には検証状態を `確認済み` / `未検証` / `推定` で明示する。
-> 最終更新: 2026-09-06 / 対象コミット: `develop` @ `e7c98a8`
->
-> 本書は「**何を知っておくべきか**」(制約・タスク境界・禁止事項) を扱う。
-> 「**何をどの順でやるか**」(環境構築・動作確認・作業手順) は [`docs/SETUP_GUIDE.md`](./SETUP_GUIDE.md) にある。
+更新: 2026-10-01。対象は `develop`。コマンドはリポジトリルートで実行します。
+新しい開発者が、モデル選択、取得・変換、headless annotation、検証まで進むための入口です。
 
-## 1. プロジェクト概要と目的
+## 1. 最初に行うこと
 
-- **プロジェクト名称・領域:** `sam3.cpp` — Meta の SAM 3 (Segment Anything Model 3) を **C++14 + ggml** に移植した画像/動画セグメンテーション推論エンジン。CPU と Metal (Apple GPU) で動作する。
-- **最終成果物:**
-  - ライブラリ本体 `sam3.cpp` (14,439 行) + 公開 API `sam3.h` (519 行) の 1 ライブラリ構成
-  - CLI 実行ファイル: `sam3_seg` (ヘッドレス点/ボックス→mask PNG)、`sam3_benchmark`、`sam3_profile_edgetam`、`sam3_quantize`
-  - GUI 実行ファイル: `sam3_image` / `sam3_video` (SDL2 + OpenGL が見つかった場合のみビルド。`examples/CMakeLists.txt:17-35`)
-  - リリース用可搬バンドル `sam3-linux-x86_64.tar.gz` (bin 4 種 + モデル 3 種 + サンプルデータ + README、約 70MB)
-- **ビジネス背景・価値:** PyTorch ランタイムなしで SAM 系モデルを動かす。リポジトリは **self-contained** (clone → build → run) を設計目標とし、ggml・EdgeTAM モデル・サンプルデータをすべて同梱している。
-- **現時点の進捗サマリ:**
-  - アーキテクチャ実装は `PLAN.md` の Phase 0〜10 (重み変換 / BPE トークナイザ / ViT / テキストエンコーダ / DETR デコーダ / PVS / 動画トラッキング / Visual-Only モデル) の構成で進行。
-  - **`確認済み`** self-contained 化 (ggml の vendor 化、モデル・データ同梱)、pixi 環境、Linux x86_64 リリース自動化までが `develop` ブランチに入っている。
-  - **`確認済み`** `main` は `01832ef` のまま。`develop` が先行しており、**未マージ** (差分は `git log --oneline main..develop`)。
+1. [README](../README.md)、[CLAUDE.md](../CLAUDE.md)、[PLAN.md](../PLAN.md) を読む。
+2. `git status --short --branch` と `git log -1 --oneline` で既存変更を確認する。
+3. 下の表からモデルを選び、そのモデルの環境だけを構築する。
+4. モデルなしの境界テストを通し、実重みを取得・変換する。
+5. 画像1枚から始め、画像列の出力・順序・品質を確認する。
+6. 推論を変更した場合は実モデル比較、最適化した場合は同条件で計測する。
+7. 明示したファイルを commit・push して PR にする。
 
----
-
-## 2. クリティカルな要求・制約
-
-> 「壊してはいけない」品質・仕様ライン。
-
-- **【最重要】ggml のグラフ分離** — パイプラインの各ステージは**専用の `ggml_context` / `ggml_cgraph` / `ggml_gallocr`** で実行し、ステージ間は CPU 側 `std::vector<float>` で受け渡す。**state tensor (`state.neck_trk[*]` 等) をグラフのオペランドにしてはいけない**。`ggml_build_forward_expand` が依存ツリー全体を辿り、ViT 全体の再計算 (2500+ ノード / 約 40 秒) を引き込む。違反すると**クラッシュせず数値だけが静かに壊れる**ため発見が極めて困難。詳細と正誤例は `CLAUDE.md` の「ggml graph isolation (CRITICAL)」章。
-- **コード構造:** struct と自由関数のみ。**クラス・継承・仮想関数・多態を使わない**。内部 static 関数は `sam3_` プレフィックス。
-- **例外を使わない。** 失敗し得る関数は `bool` か `nullptr` を返す。診断は `fprintf(stderr, ...)` (`std::cerr` は使わない)。
-- **依存関係の固定:** ライブラリ本体の依存は **ggml (in-tree) / stb / C++14 標準ライブラリのみ**。SDL2 と ImGui は examples 専用。新規サードパーティ依存を足さない。
-- **vendored ggml を勝手に更新しない。** `ggml/` はサブモジュールではなくピン留めスナップショット (`331b9cba52b23d895bc4ad218c007eb5e667540f`、PABannier/ggml の sam3-metal-ops ブランチ) を in-tree 展開したもの。
-- **リリースバンドルの可搬性条件** (`.github/workflows/release.yml` の `Audit portability` が CI で強制):
-  - GLIBC 要求が **2.41 以下** (デプロイ先 Debian 13 trixie の glibc)
-  - **libgomp / libstdc++ を動的リンクしない** (`GGML_OPENMP=OFF`、`-static-libstdc++ -static-libgcc`)
-  - `GGML_NATIVE=OFF` + AVX2/FMA 固定 (ビルドマシン依存の命令を焼き込まない)
-- **Python は `uv` のみ。** 素の `python` / `pip` を使わず、必ず `uv run python` / `uv pip install`。
-- **速度は第一級の要求。** 不要なコピーを避け、in-place な ggml 演算 (`_inplace`) を優先し、バックエンドが対応するなら手書き attention より `ggml_flash_attn_ext` を使う。
-
----
-
-## 3. 参照すべき合意済み資料
-
-| 種別 | ファイル/リンク | 概要・用途 |
-|------|------------------|------------|
-| 開発規約 (最重要) | `CLAUDE.md` | アーキテクチャ方針、**ggml グラフ分離ルール**、コードスタイル、ビルド/ベンチマーク手順。作業前に必読。 |
-| 実装計画 | `PLAN.md` | Phase 0〜10 の全体計画。ディレクトリ構成、重みバイナリ形式、変換スクリプト仕様、各 Phase の検証基準。 |
-| 利用者向け README | `README.md` | Quick Start (pixi / プリビルド / 手動ビルド)、ベンチマーク結果、Model Zoo、Feature Matrix。 |
-| リリース同梱 README | `README-release.md` | 配布バンドルの中身と実行要件 (AVX2+FMA、glibc >= 2.38、ffmpeg)。バンドルに `README.md` として同梱される。 |
-| 作業記録 | `diary/workdoc_Sep06-2026_vendor_pixi_release.md` | vendor 化 / pixi / プリビルド作業の目的分析・手順 11 件のチェックリスト・作業記録。 |
-| 公開 API | `sam3.h` | `sam3_load_model` / `sam3_encode_image` / `sam3_segment_pcs` / `sam3_segment_pvs` / `sam3_create_tracker` / `sam3_track_frame` など。`sam3_test_*` は検証用の内部 API。 |
-| CI / リリース | `.github/workflows/release.yml`, `.github/workflows/ci.yml` | リリースは Linux x86_64 のみ。CI はビルド検証のみ (macOS/Linux/Windows)。 |
-| 上流実装 | https://github.com/facebookresearch/sam3 | テンソル形状・演算順序・活性化関数の**ground truth**。迷ったら Python ソースを読む。 |
-| 参考移植 | https://github.com/YavorGIvanov/sam.cpp | SAM 1 の C++/ggml 移植。グラフ構築・重み読み込みのパターン参考。 |
-| ggml 実例 | `ggml/examples/` | ピン留めバージョンに対して常に正しい API 使用例 (backend init、`ggml_gallocr`、`ggml_backend_graph_compute`)。 |
-
-**既知課題リスト:** `未確認` — 専用ファイルは存在しない。次に確認すべきは GitHub Issues (`gh issue list`) と `PLAN.md` 各 Phase の検証基準。
-
----
-
-## 4. タスク境界（任せること / 任せないこと）
-
-### 任せるタスク
-- `sam3.cpp` / `sam3.h` の推論パス実装・バグ修正 (グラフ分離ルールを守る前提)
-- `examples/` 以下の CLI・GUI ツールの追加や改善
-- ggml カーネル選択の最適化、プロファイリング (`sam3_profile_edgetam`、`sam3_benchmark`)
-- ビルドシステム (`CMakeLists.txt`、`pixi.toml`)、CI/リリースワークフローの整備
-- 重み変換スクリプト (`convert_*_to_ggml.py`) の修正 — 実行は `uv run python`
-- `tests/` 以下の Python 比較スクリプトによる数値検証
-- ドキュメント (`README.md`、`docs/`、`diary/` の作業書) の更新
-
-### 任せないタスク
-- **`ggml/` 配下の直接編集** — ピン留めスナップショット。修正が必要なら上流と pin の更新方針を人間に確認する。
-- **`models/*.ggml` の差し替え・再生成** — リポジトリ同梱の EdgeTAM 重み (計 64MB) は意図的に vendor されている。
-- **グラフ分離ルールを崩す「最適化」** — 複数ステージを 1 グラフに統合するのは禁止。速くなるように見えて出力が壊れる。
-- **リリースの公開 (`v*` タグの push)** — 公開リポジトリの Release ページに出る不可逆操作。人間の明示的な指示が必要。
-- **`main` への直接 push / マージ** — 現状の作業は `develop` 上。マージ可否は人間が判断する。
-- **会話ログ・PII のコミット** — `temp/` はグローバル gitignore 済み。セッション抽出物は public リポジトリに入れない (`diary/` には作業書のみ置く運用)。
-- **新規サードパーティ依存の追加** — 依存構成は固定。
-
----
-
-## 5. インタラクション方針
-
-- **回答スタイル:** 日本語。見出し + 箇条書き/表を優先し、冗長な散文を避ける。技術用語・コード識別子は原語のまま。
-- **回答手順:** 前提 (何を確認したか) → 実施内容 → 検証結果 → 残作業・判断が必要な点、の順。
-- **禁止事項・注意:**
-  - **未実行のコマンドを「検証済み」と書かない。** 実行して終了コードと出力を確認したものだけを確認済みとする。
-  - 出力が途中で切れている場合、それを「正常終了」と読み違えない (実際にこのリポジトリで SIGPIPE 失敗を出力切れと誤読した事例あり。`diary/` 参照)。
-  - 数値的に壊れる変更は静かに通るため、推論パスを触ったら必ず既知スコアと突き合わせる。
-- **秘匿情報の扱い:** 認証情報・トークン・鍵をコミットやドキュメントに含めない。会話ログや PII を public リポジトリに置かない。ローカル絶対パス (`/home/<user>/...`) の記載は最小限にする。
-
----
-
-## 6. 試行タスク（オンボーディング演習）
-
-1. **ビルドと推論の再現** — `pixi run demo-cpu` を実行し、`output/mask.png` が生成され、標準出力に `Detections: 1` と `score=0.511` が出ることを確認する。
-   - `確認済み` (2026-09-06、Linux x86_64 + debian:13 コンテナの双方で `score=0.511 iou=0.511 box=(91.0, 217.0, 347.0, 377.0)`)
-2. **動画パスの確認** — `pixi run benchmark-cpu` を実行し、`SUMMARY: 3 runs, 3 OK, 0 FAIL` 相当が出ることを確認する。ffmpeg は pixi 環境が提供する。
-   - `確認済み` (2026-09-06、EdgeTAM 3 種で `3/3 OK`。単一モデル 3 フレームでも `1 OK / 0 FAIL`)
-3. **可搬性の理解** — `pixi run release-build` でバンドルを作り、`objdump -T dist/.../bin/sam3_seg | grep GLIBC_` で最大 GLIBC 要求を求め、`ldd` に libgomp / libstdc++ が現れないことを確認する。なぜこの 2 条件が必要かを `README-release.md` と `release.yml` の `Audit portability` から説明できるようにする。
-   - `確認済み` (ローカル conda ツールチェーンでは 2.27、CI の ubuntu-24.04 ビルドでは 2.38。いずれもデプロイ先の 2.41 以下)
-4. **グラフ分離ルールの読解** — `CLAUDE.md` の CRITICAL 章を読み、`sam3_segment_pcs` (5 サブグラフ) が「なぜ」1 グラフではないのかを説明できるようにする。
-
----
-
-## 7. 運用ルール・変更管理
-
-- **ドキュメント更新時の記載ルール:** 事実には `確認済み` / `未検証` / `推定` を付す。確認済みには確認日と根拠 (コマンド・出力・run ID) を併記する。
-- **TBD の扱い:** 不明な項目は空欄にせず `未確認` と書き、**次に確認すべき情報源**を添える。
-- **レビュー/承認フロー:** `未確認` — ブランチ保護ルールや必須レビューは設定を確認していない。次に確認するのは `gh api repos/yuki-inaho/sam3.cpp/branches/main/protection`。現状の運用実績としては、作業は `develop` で行い、`main` へのマージとタグ打ちは人間が判断している。
-- **作業書の運用:** 大きな作業は `temp/workdoc_<Mon><D>-<YYYY>_<slug>.md` に作業書を作成し、完了後に `diary/` へ複製して追跡する (`diary/workdoc_Sep06-2026_vendor_pixi_release.md` が実例)。
-- **リリース手順:**
-  1. `develop` / `main` への push で Release ワークフローの build + verify が走る (**公開はされない**)
-  2. グリーンを確認してから `git tag vX.Y.Z && git push origin vX.Y.Z`
-  3. `release` ジョブは `needs: [build, verify-linux]` かつタグ ref 限定。**ターゲット環境で動作実証されていないバンドルは Release ページに出ない**
-- **その他:** `.gitignore` は `models/` と `data/` を原則除外しつつ、同梱対象のファイルだけを `!` で復活させている。ファイルを増やす場合はこの構造を壊さない。
-
----
-
-### 付録: 参考情報
-
-**主要リポジトリ/ディレクトリ**
-
-| パス | 役割 |
-|------|------|
-| `sam3.cpp` / `sam3.h` | ライブラリ本体と公開 API (この 2 ファイルが実装のすべて) |
-| `ggml/` | vendored ggml (pin `331b9cba`、サブモジュールではない) |
-| `examples/` | `sam3_seg` / `benchmark` / `profile_edgetam` / `quantize` / GUI 2 種 |
-| `models/` | EdgeTAM 重み `edgetam_{f16,q8_0,q4_0}.ggml` (計 64MB、同梱) |
-| `data/` | `test_image.jpg` (猫 2 匹) / `test_video.mp4` (同梱) |
-| `tests/` | Python 数値比較スクリプト群 + C++ テスト (`-DSAM3_BUILD_TESTS=ON`) |
-| `scripts/` | `package_release.sh` / `download_model.sh` / `download_test_data.sh` / `verify_tokenizer.py` |
-| `stb/` | stb_image / stb_image_write |
-| `diary/` | 作業書のアーカイブ |
-| `temp/` | 作業用 (グローバル gitignore 済み、コミットしない) |
-
-**代表的なコマンド**
-
-```bash
-# ビルド (pixi が cmake/ninja/コンパイラ/ffmpeg を用意する)
-pixi run build
-
-# ヘッドレス CPU デモ -> output/mask.png
-pixi run demo-cpu
-
-# エンコーダのステージ別レイテンシ
-pixi run profile-cpu
-
-# 動画トラッキングのベンチマーク
-pixi run benchmark-cpu
-
-# 可搬バンドル -> dist/sam3-linux-x86_64-<version>.tar.gz
-pixi run release-build
-
-# pixi を使わない場合
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel
-
-# テストを含める
-cmake -B build -DSAM3_BUILD_TESTS=ON
-
-# ベンチマークの高速イテレーション (同梱の EdgeTAM 3 種のみ)
-./build/examples/sam3_benchmark --models-dir models --video data/test_video.mp4 \
-    --filter edgetam --cpu-only --n-frames 3
+```sh
+git clone --branch develop https://github.com/yuki-inaho/sam3.cpp.git
+cd sam3.cpp
+git switch -c feature/my-change
+git status --short --branch
 ```
 
-**依存ライブラリ**
+## 2. モデルと実行経路
 
-- ライブラリ本体: ggml (in-tree) / stb (in-tree) / C++14 標準ライブラリ **のみ**
-- examples 専用: SDL2 + ImGui (見つからなければ GUI 例をスキップ)
-- 実行時 (動画機能のみ): `ffmpeg` CLI が PATH 上にあること
-- ビルド環境 (pixi): `cmake>=3.31` / `ninja>=1.11` / `cxx-compiler>=1.7` / `ffmpeg>=6.0` / `patchelf>=0.17`
-- Python: `uv` 管理 (`pyproject.toml` / `uv.lock`)。重み変換とテスト用。
+| モデル | 入力・用途 | 推論 | 入口 |
+| --- | --- | --- | --- |
+| 同梱 EdgeTAM | 点・矩形、画像・動画 | C++14 / ggml、CPU・Metal | [SETUP_GUIDE](SETUP_GUIDE.md) |
+| SAM 3 | テキスト・視覚プロンプト | C++14 / ggml | [README](../README.md)、モデル別 Feature Matrix |
+| SAM 3.1 ConvRot INT8 | 初期画像の点指定、1〜16対象の前向き追跡 | `sam31/native/` の C++17 / CPU FP32・CBLAS | [SAM31_GUIDE](SAM31_GUIDE.ja.md) |
+| EfficientSAM3 EV-M | テキストによる画像・明示順の画像列検出 | C++14 / ggml、CPU | [EFFICIENTSAM3](EFFICIENTSAM3.md) |
 
-**CI / リリース状況** (`確認済み` 2026-09-06)
+SAM3.1 の GGUF は元の INT8・尺度・回転を保持し、使用時に逆 ConvRot と FP32 復元を行います。
+GGML Q8_0 への再量子化や GPU INT8 演算ではありません。推論は Python/PyTorch/ONNX Runtime を起動しません。
 
-| 項目 | 状態 |
-|------|------|
-| Release ワークフロー | 登録・実行済み。最新 run `34021512702` は **成功** (build ✅ / verify ✅ / release skipped) |
-| Release の対象 | **Linux x86_64 のみ**。macOS / arm64 / Windows は release.yml から除外済み |
-| verify の内容 | `debian:13` コンテナで実バンドルを実行し、`sam3_seg` の mask 生成と `sam3_benchmark` の `0 FAIL` を assert |
-| CI ワークフロー (`ci.yml`) | **`未検証`** — `main` への push / PR でのみ起動する設定のため、このリポジトリでは一度も実行されていない |
-| Metal バックエンド | **`未検証`** — 検証環境が Linux のため、この作業では確認していない |
-| SAM 3 本体モデル | **`未検証`** — 同梱されているのは EdgeTAM のみ。テキストプロンプト (PCS) 経路は別途重みの取得が必要 |
+EV-M の公開 checkpoint に memory tracker はありません。画像列はフレームごとの独立検出です。
+query ID を物体の追跡 ID として扱わず、PVS・tracker API の明示拒否を維持してください。
+対応 variant は EfficientViT **b1** + MobileCLIP **S0**、context **16**、入力 **1008×1008** です。
 
-**デプロイ先環境** (利用者から提示された実測値)
+## 3. 主要ファイルと責務
 
-| 項目 | 値 |
-|------|-----|
-| OS / Kernel | Debian GNU/Linux 13 (trixie) / Linux 6.18.35 |
-| アーキテクチャ | x86_64 (AMD EPYC 9V74、論理 5 CPU、KVM) |
-| 命令セット | SSE〜SSE4.2 / AVX / AVX2 / AVX-512 / FMA / VNNI |
-| glibc | 2.41 |
-| ツールチェーン | GCC 14.2 / Clang 17 (Clang 用 OpenMP なし) / CMake 3.31.6 / Ninja 1.12.1 |
-| 未導入 | Eigen3 / fmt / spdlog / GoogleTest / Catch2 |
+| パス | 用途 |
+| --- | --- |
+| `sam3.cpp` / `sam3.h` | SAM3・EdgeTAM・EV-M のライブラリと公開 API |
+| `ggml/` / `stb/` | 固定された vendored 依存。ggml は submodule ではない |
+| `examples/efficientsam3.cpp` | EV-M の headless 画像・画像列 CLI |
+| `convert_efficientsam3_to_gguf.py` | EV-M の strict 検査と全 payload GGUF 照合 |
+| `efficientsam3/` | CPU 専用 uv 環境、固定取得・参照・E2E |
+| `sam31/native/` | SAM3.1 の GGUF 読込、演算、追跡、CLI |
+| `sam31/tools/` / `sam31/tests/` | 変換、人工入力、実モデル E2E、境界・回帰検査 |
+| `tests/test_efficient_*.py` | EV-M CLI 境界と opt-in 実モデル E2E |
+| `docs/efficientsam3-validation/` / `docs/sam31-validation/` | 公開重みの変換・数値・性能・復元証跡 |
+| `scripts/package_*.py` | source/docs/tests の zstd 梱包 |
+| `models/`、`outputs/`、`runs/`、`build/`、`dist/` | 重み・生成物・作業用。新規生成物を commit しない |
 
-**連絡先/責任者:** `未確認` — リポジトリオーナーは GitHub `yuki-inaho`。責任分担の定義ファイルは存在しない。
+## 4. 前提条件と環境
 
-**ドキュメント乖離の修正履歴** (`確認済み` 2026-09-06)
+- Git、uv、CMake、C++ compiler。Python の実行は必ず `uv run` を使う。
+- EV-M の Python は 3.11 または 3.12。CPU torch を `efficientsam3/.venv` に同期する。
+- SAM3.1 は C++17、OpenBLAS、zstd を用意し、`sam31/.venv` を使う。root の torch 環境は不要。
+- GUI は SDL2 / OpenGL、動画切り出しは ffmpeg が別途必要。以下の CLI は headless。
+- 重み、Python環境、変換前後ファイル、検証出力の容量を見込む。重い export/E2E を同時実行しない。
 
-本ドキュメント作成時に実ファイルと突き合わせて 3 件の乖離を検出し、**いずれも修正済み**:
+### 4.1 EV-M：取得 → GGUF → annotation
 
-| 箇所 | 内容 | 対応 |
-|------|------|------|
-| `CLAUDE.md` | 未実装の `--filter-prec f16,q4_0` を案内していた | 実在するフラグ (`--filter edgetam_q8_0 --cpu-only --n-frames 3`) に置換。`--encode-img-size` を一覧に追加 |
-| `CLAUDE.md` | macOS 専用の `make -j$(sysctl -n hw.ncpu)` | `cmake -B build -G Ninja` + `cmake --build build --parallel` に置換 |
-| `README.md` | プリビルドの展開先を `sam3-linux-x86_64-bundle`、glibc 要件を 2.17 と記載 | CI が実際に公開する `sam3-linux-x86_64` / glibc 2.38 に修正。Model Zoo に「同梱は EdgeTAM 3 種のみ」を追記 |
+```sh
+uv sync --project efficientsam3 --locked
+uv run --project efficientsam3 python efficientsam3/fetch.py
+uv run --project efficientsam3 python convert_efficientsam3_to_gguf.py
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DSAM3_BUILD_SAM31=OFF -DSAM3_METAL=OFF -DGGML_NATIVE=OFF
+cmake --build build --target efficientsam3 --parallel 8
+mkdir -p output/efficient
+build/examples/efficientsam3 \
+  --model models/efficientsam3_ev_m.gguf \
+  --image outputs/efficientsam3/source/sam3/assets/dog_person.jpeg \
+  --text dog --threads 4 --output output/efficient
+```
 
-> `sam3_benchmark` の実フラグは `--models-dir` / `--video` / `--point-x` / `--point-y` / `--n-frames` /
-> `--n-threads` / `--encode-img-size` / `--cpu-only` / `--gpu-only` / `--filter` / `--help` (`examples/benchmark.cpp:461-470`)。
-> 今後も乖離を見つけたら、該当ファイルを直したうえでこの表に記録すること。
+画像列は `--image frame0.png --image frame1.png` を入力順に指定します。
+出力は mask PNG と `annotations.json`（frame index、score、pixel box、時間）。
+source revision と checkpoint SHA を固定し、799 keys・shape・dtype・有限値を検査して strict ロードします。
+upstream の部分ロード helper を使用しません。実測 parameters は **97,435,030** で、上流 README 表の89.2Mと異なります。
 
-## SAM 3.1 native CPU / ConvRot GGUF
+### 4.2 SAM3.1：SafeTensors → GGUF → annotation
 
-SAM 3.1の取得・uv環境・無損失GGUF変換・C++ビルド・画像/連続画像annotation・smoke検証は [SAM31_GUIDE.ja.md](SAM31_GUIDE.ja.md) にまとめています。既存SAM3とは別targetで、モデル重み・トークン・ローカル認証情報をGitへ含めません。
-# EfficientSAM3 EV-M
+取得元の利用条件を確認し、必要な認証は端末の `HF_TOKEN` または HF credential から渡します。
+トークン値を表示したり文書へ保存したりしないでください。
 
-公開EV-MをCPU専用uv環境で取得・GGUF変換し、native C++/ggmlの画像・画像列annotationを実行できる。
-一貫した取得→変換→build→CLI→E2E手順は [EfficientSAM3 guide](EFFICIENTSAM3.md) を参照する。
+```sh
+uv sync --project sam31 --python 3.11 --locked
+uv run --project sam31 python sam31/tools/fetch_assets.py --models-dir models
+uv run --project sam31 python sam31/tools/convert_sam31_to_gguf.py \
+  --input models/sam3.1_multiplex_convrot_int8.safetensors \
+  --output models/sam3.1_multiplex_convrot_int8.gguf --verify
+cmake -S . -B build-sam31 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+  -DSAM3_BUILD_SAM31=ON -DSAM3_METAL=OFF -DSAM31_BUILD_REFERENCE=OFF \
+  -DPython3_EXECUTABLE="$PWD/sam31/.venv/bin/python"
+cmake --build build-sam31 --parallel 8
+build-sam31/sam31/sam31 synthetic --output runs/synthetic --frames 6
+OPENBLAS_NUM_THREADS=16 build-sam31/sam31/sam31_image \
+  --model models/sam3.1_multiplex_convrot_int8.gguf \
+  --image runs/synthetic/image.png --point 1:0.25:0.32 --point 2:0.73:0.68 \
+  --threads 16 --cache-mb 4096 --output runs/image
+OPENBLAS_NUM_THREADS=16 build-sam31/sam31/sam31_video \
+  --model models/sam3.1_multiplex_convrot_int8.gguf \
+  --frames runs/synthetic/frames --point 1:0.25:0.32 --point 2:0.73:0.68 \
+  --threads 16 --cache-mb 4096 --output runs/video
+```
+
+`--point ID:X:Y[:LABEL]` は正規化座標、正例1・負例0です。初期画像で複数点を指定できます。
+動画は同寸法の2枚以上の画像列を自然順で読みます。MP4 は先に ffmpeg で切り出します。
+出力先の再利用は拒否されるため、新しいディレクトリを指定してください。
+mask PNG、FP32 logits、`report.json` の形式と独立した IoU 検査は [詳細ガイド](SAM31_GUIDE.ja.md) を参照します。
+
+## 5. 検証と完了判定
+
+| 変更 | 最初の検査 | 実モデルでの確認 |
+| --- | --- | --- |
+| EV-M 変換・CLI | 下の pytest | 全799 payload照合、PyTorchとの画像・6frame比較 |
+| SAM3.1 演算・CLI | CTest の高速5グループ | 指定GGUFの画像2mask・動画12mask、finite・IoU・ID・memory |
+| ggml encoder / PCS | 段階別 trace と既存対象テスト | 同じ前処理入力で最初にずれる stage を特定 |
+| docs / 梱包 | 相対リンク・CLI引数、`git diff --check` | zstd整合性・SHA・復元ファイル・owner header |
+
+```sh
+uv run --project efficientsam3 pytest \
+  tests/test_efficientsam3_conversion.py tests/test_efficient_cli.py -q
+OPENBLAS_NUM_THREADS=1 ctest --test-dir build-sam31 -LE real --output-on-failure
+```
+
+実モデル E2E は source・checkpoint・GGUF・binary を配置後に明示実行します。
+
+```sh
+EFFICIENTSAM3_REAL=1 uv run --project efficientsam3 pytest tests/test_efficient_e2e.py -q
+uv run --project sam31 python sam31/tools/run_native_e2e.py \
+  --binary build-sam31/sam31/sam31 --model models/sam3.1_multiplex_convrot_int8.gguf \
+  --threads 16 --output runs/native-e2e
+```
+
+skip は実モデル成功の証拠に数えません。`TEST_ONLY` の縮小・未学習 fixture と指定実重みを区別します。
+2026-10-01 の EV-M 6frame PyTorch 比較は最小 IoU **0.999962**、同一CHWの最終mask比較は **0.999993**。
+SAM3.1 は人工入力の全14maskが正解と IoU **1.0**。
+SAM3.1 の一般画像精度や公式 PyTorch との全面的な数値一致は、この smoke の検証範囲に含みません。
+
+## 6. アーキテクチャ・性能の契約
+
+- `sam3.cpp` は structs / free functions、C++14、例外なし。内部 static 関数は `sam3_` prefix。
+- ggml の各 stage は専用 context / graph / gallocr を持ち、CPU vector で受け渡す。
+  前 stage の state tensor を新 graph の operand に入れない。祖先の encoder を再計算し、静かに出力が壊れる原因になる。
+- model weights は永続 buffer。vendored ggml の更新は独立した検証を伴う変更として扱う。
+- SAM3.1 は独立した C++17 module。CBLAS と OpenMP の thread 数は別で、
+  `OPENBLAS_NUM_THREADS` と `--threads` を両方記録する。
+- `SAM3_EFFICIENT_PROFILE=1` は EV-M stage 時間、SAM3.1 の `--profile` は operator 時間を記録する。
+- 比較時は model SHA、入力、前処理、build flags、backend、threads、反復回数を揃える。
+  I/O・初回load・cacheを含む全体時間と stage時間を区別する。
+
+SAM3.1 の等価並列化では同条件1回の画像計測が44.872秒→35.354秒（21.2%短縮）、logitsはbyte一致。
+EV-M の4threads約9.75秒 / 16threads約10.95秒も各1回の観測で、速度保証ではありません。
+採用しなかった grouped GEMM 案を改善として報告しないでください。
+
+## 7. 公開物・変更管理
+
+Git に含めるのは source、tests、lockfiles、再現手順、公開情報だけの検証 JSON です。
+追加の実重み、ONNX、annotation payload、個人画像、認証情報、shell設定、端末固有の絶対パス、
+セッション transcript は含めません。同梱 EdgeTAM / sample data は既存の例外です。
+source archive とモデルは別々に zstd 圧縮し、展開後の `FILES.sha256` とモデルSHAを検査します。
+梱包手順は各詳細ガイドにあります。tar owner名を除き、環境cacheを含めないでください。
+
+```sh
+git diff --check
+git diff --cached --stat
+git diff --cached
+```
+
+作業は feature branch → PR を基本とし、対象 base（この実装は `develop`）を明記します。
+ユーザーの明示した commit / push / merge の指示を実行します。CI の未実行・skip を成功と記録しません。
+作業終了時は提出物と原本を保持し、今回作成した一時 checkout だけを整理します。
+`uv cache prune` は `uv run` の子として起動せず、端末から直接実行します。
+
+## 8. トラブルシューティング
+
+| 症状 | 確認と対応 |
+| --- | --- |
+| SHA / revision / shape 不一致 | variant と取得元を確認。strict 検査を緩めず、固定 revision を取得し直す |
+| SAM3.1 が極端に遅い | configure の `CBLAS acceleration enabled` を確認。OpenBLAS後入れならガイドの検出cache更新を使う |
+| EV-M E2E が skip | source・checkpoint・GGUF・binary を配置し、`EFFICIENTSAM3_REAL=1` を指定 |
+| 画像列の対応がおかしい | EV-M の明示入力順、SAM3.1 の自然順と全画像寸法を確認 |
+| PVS / tracker が EV-M を拒否 | detector専用checkpointの仕様。追跡が必要ならSAM3.1を選ぶ |
+| 既存出力先が拒否される | SAM3.1 の完了出力を保ち、新規出力先を指定 |
+| CPU の結果が参照と異なる | 同じCHW入力とstage traceを比較。stb / Pillowのresize差を分離 |
+
+## 9. オンボーディング完了チェックリスト
+
+- [ ] モデル・backend・対応範囲を選んだ
+- [ ] 作業ブランチ・既存変更を確認した
+- [ ] 選んだ uv project と build target を構築した
+- [ ] 固定取得元・SHA・変換照合を確認した
+- [ ] headless 画像と画像列の PNG / JSON を確認した
+- [ ] 境界・回帰検査と必要な実モデル E2E が成功した
+- [ ] 計測条件と未検証範囲を記録した
+- [ ] staged diff に認証情報・個人データ・新規大容量生成物がない
+
+## 10. 参照と更新履歴
+
+構成は関連リポジトリ FlashVSR / ZipMap の ONBOARDING の「入口・責務・環境・実行・検証・トラブル対応」を参考にしました。
+実行内容は本リポジトリの CLI、CMake、uv lock、検証 JSON に照合しています。
+
+- [公式 SAM3](https://github.com/facebookresearch/sam3): 演算順序とshapeの参照
+- [EfficientSAM3 固定source](https://github.com/SimonZeng7108/efficientsam3/tree/bd0936c788fed8d51fa799437f05abd97b401b06): EV-M builder
+- [対応する ONNX repo](https://github.com/yuki-inaho/sam3-video-tracking-onnx-export/blob/main/docs/ONBOARDING.md): CPU export / annotation UI
+- [SAM1 C++移植](https://github.com/YavorGIvanov/sam.cpp): ggml graph構築の参考。使用APIは本repoのvendored例を優先
+
+2026-10-01: SAM3.1 / EV-M のモデル別導線を統合。古い端末情報を除き、実モデルとfixture、追跡と独立検出、実測と保証の区別を更新。
