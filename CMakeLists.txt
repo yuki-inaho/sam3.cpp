@@ -38,3 +38,10 @@ option(SAM3_BUILD_TESTS "Build test executables" OFF)
 if(SAM3_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
+
+# Separate SAM 3.1 Multiplex CPU / GGUF extension.
+option(SAM3_BUILD_SAM31 "Build SAM 3.1 native image/video inference" ON)
+if(SAM3_BUILD_SAM31)
+    enable_testing()
+    add_subdirectory(sam31)
+endif()

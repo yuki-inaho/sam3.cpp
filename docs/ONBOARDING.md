@@ -211,3 +211,7 @@ cmake -B build -DSAM3_BUILD_TESTS=ON
 > `sam3_benchmark` の実フラグは `--models-dir` / `--video` / `--point-x` / `--point-y` / `--n-frames` /
 > `--n-threads` / `--encode-img-size` / `--cpu-only` / `--gpu-only` / `--filter` / `--help` (`examples/benchmark.cpp:461-470`)。
 > 今後も乖離を見つけたら、該当ファイルを直したうえでこの表に記録すること。
+
+## SAM 3.1 native CPU / ConvRot GGUF
+
+SAM 3.1の取得・uv環境・無損失GGUF変換・C++ビルド・画像/連続画像annotation・smoke検証は [SAM31_GUIDE.ja.md](SAM31_GUIDE.ja.md) にまとめています。既存SAM3とは別targetで、モデル重み・トークン・ローカル認証情報をGitへ含めません。

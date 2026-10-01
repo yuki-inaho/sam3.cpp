@@ -1,0 +1,19 @@
+{
+  "kind": "synthetic-test-input-not-model-output",
+  "frame_count": 6,
+  "width": 640,
+  "height": 384,
+  "object_ids": [
+    1,
+    2
+  ],
+  "points": [
+    "1:0.234375:0.2864583333333333",
+    "2:0.70625:0.7083333333333334"
+  ],
+  "ground_truth_used_as_model_input": false,
+  "moving_objects": [
+    "circle",
+    "rectangle"
+  ]
+}
