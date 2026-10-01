@@ -1,0 +1,113 @@
+{
+  "passed": true,
+  "checkpoint_source_sha256": "21fc2308ef4bf82a1d372e147170e2d48ed8f3688922b4eaa3e341828333debd",
+  "binary_sha256": "5ddc67be910ae57330b145b4ca69e1d7269ef7edc5de2f447fdffc7ab2f61d38",
+  "gguf_sha256": "e59728d18a3e0f6bfd603eee86490b6116b9141d4e4cd3acdc0309ea443ec370",
+  "threads": 16,
+  "image": {
+    "passed": true,
+    "frames": 1,
+    "objects": 2,
+    "threshold": 0.8,
+    "minimum_iou": 1.0,
+    "source_sha256": "21fc2308ef4bf82a1d372e147170e2d48ed8f3688922b4eaa3e341828333debd",
+    "metrics": [
+      {
+        "frame": 0,
+        "object_id": "1",
+        "iou": 1.0,
+        "foreground_pixels": 373
+      },
+      {
+        "frame": 0,
+        "object_id": "2",
+        "iou": 1.0,
+        "foreground_pixels": 288
+      }
+    ]
+  },
+  "video": {
+    "passed": true,
+    "frames": 6,
+    "objects": 2,
+    "threshold": 0.8,
+    "minimum_iou": 1.0,
+    "source_sha256": "21fc2308ef4bf82a1d372e147170e2d48ed8f3688922b4eaa3e341828333debd",
+    "metrics": [
+      {
+        "frame": 0,
+        "object_id": "1",
+        "iou": 1.0,
+        "foreground_pixels": 373
+      },
+      {
+        "frame": 0,
+        "object_id": "2",
+        "iou": 1.0,
+        "foreground_pixels": 288
+      },
+      {
+        "frame": 1,
+        "object_id": "1",
+        "iou": 1.0,
+        "foreground_pixels": 376
+      },
+      {
+        "frame": 1,
+        "object_id": "2",
+        "iou": 1.0,
+        "foreground_pixels": 304
+      },
+      {
+        "frame": 2,
+        "object_id": "1",
+        "iou": 1.0,
+        "foreground_pixels": 370
+      },
+      {
+        "frame": 2,
+        "object_id": "2",
+        "iou": 1.0,
+        "foreground_pixels": 304
+      },
+      {
+        "frame": 3,
+        "object_id": "1",
+        "iou": 1.0,
+        "foreground_pixels": 370
+      },
+      {
+        "frame": 3,
+        "object_id": "2",
+        "iou": 1.0,
+        "foreground_pixels": 288
+      },
+      {
+        "frame": 4,
+        "object_id": "1",
+        "iou": 1.0,
+        "foreground_pixels": 376
+      },
+      {
+        "frame": 4,
+        "object_id": "2",
+        "iou": 1.0,
+        "foreground_pixels": 288
+      },
+      {
+        "frame": 5,
+        "object_id": "1",
+        "iou": 1.0,
+        "foreground_pixels": 373
+      },
+      {
+        "frame": 5,
+        "object_id": "2",
+        "iou": 1.0,
+        "foreground_pixels": 288
+      }
+    ]
+  },
+  "image_elapsed_ms": 34964.594587,
+  "video_elapsed_ms": 250481.618097
+}

@@ -47,6 +47,7 @@ namespace sam31 {
                 Counters&calls_;
                 Ops op_;
                 public: Graph(Model::Impl&m,Counters&calls):m_(m),w_(m.weights),c_(w_.config),calls_(calls),op_(w_,calls) {
+                    calls_.profile=m_.options.profile;
 #ifdef _OPENMP
                     omp_set_dynamic(0);
                     omp_set_num_threads(m_.options.threads);
@@ -200,17 +201,37 @@ namespace sam31 {
                     result.scores.resize(objects);
                     result.quality.resize(objects);
                     Tensor selected(objects,1,c_.dim);
+                    auto candidate_logits=[&](size_t object,size_t candidate) {
+                        std::vector<float> logits(up.rows());
+                        for(size_t n=0; n<up.rows(); ++n) {
+                            float value=0;
+                            for(size_t d=0; d<up.c; ++d)value+=up.row(n)[d]*hypers[candidate].row(object)[d];
+                            logits[n]=value;
+                        }
+                        return logits;
+                    };
                     for(size_t o=0; o<objects; ++o) {
+                        // One initial point uses the three ambiguity candidates. For
+                        // multiple clicks, keep the single-mask token when stable.
                         size_t best=multiplex?0:1;
                         for(size_t k=best+1; k<masks; ++k)if(quality.row(o)[k]>quality.row(o)[best])best=k;
+                        std::vector<float> logits;
+                        if(!multiplex && points.size()>1) {
+                            logits=candidate_logits(o,0);
+                            size_t intersection=0,united=0;
+                            for(float value:logits) {
+                                intersection+=value>0.05f;
+                                united+=value>-0.05f;
+                            }
+                            const double stability=united?double(intersection)/united:1.0;
+                            if(stability>=0.98)best=0;
+                            else logits.clear();
+                        }
+                        if(logits.empty())logits=candidate_logits(o,best);
                         result.scores[o]=scores.row(o)[0];
                         result.quality[o]=quality.row(o)[best];
                         std::copy_n(hs.row(2*objects+o*masks+best),c_.dim,selected.row(o));
-                        for(size_t n=0; n<up.rows(); ++n) {
-                            float value=0;
-                            for(size_t d=0; d<up.c; ++d)value+=up.row(n)[d]*hypers[best].row(o)[d];
-                            result.masks.row(n)[o]=result.scores[o]>0?value:-1024.0f;
-                        }
+                        for(size_t n=0; n<up.rows(); ++n)result.masks.row(n)[o]=result.scores[o]>0?logits[n]:-1024.0f;
                     }
                     result.pointers=op_.mlp(selected,multiplex?"obj_ptr_proj":"interactive_obj_ptr_proj");
                     Tensor no_object=op_.linear(result.pointers,"no_obj_ptr_linear");

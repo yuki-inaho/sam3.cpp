@@ -11,7 +11,7 @@ namespace fs=std::filesystem;
 using namespace sam31::native;
 namespace {
     void usage() {
-        std::cout<< "SAM 3.1 native C++ CPU inference (GGUF / ConvRot INT8 storage, FP32 compute)\n" "  sam31 image --model MODEL.gguf --image INPUT --point ID:X:Y[:LABEL] --output DIR\n" "  sam31 video --model MODEL.gguf --frames DIR --point ID:X:Y[:LABEL] --output DIR\n" "  sam31 inspect MODEL.gguf [--allow-test-fixture] [--read-all]\n" "  sam31 manifest [--smoke]\n" "  sam31 synthetic --output DIR [--frames COUNT]\n" "Options: --threads N --cache-mb N --allow-test-fixture --ablate-memory\n" "Coordinates are normalized [0,1]. LABEL is 1 (positive, default) or 0 (negative).\n" "One bucket supports 1..16 objects. Multiple points per ID are allowed.\n" "No Python, PyTorch, ONNX runtime or child process is used during inference.\n" "Test fixtures are UNTRAINED; smoke execution is not a segmentation accuracy test.\n";
+        std::cout<< "SAM 3.1 native C++ CPU inference (GGUF / ConvRot INT8 storage, FP32 compute)\n" "  sam31 image --model MODEL.gguf --image INPUT --point ID:X:Y[:LABEL] --output DIR\n" "  sam31 video --model MODEL.gguf --frames DIR --point ID:X:Y[:LABEL] --output DIR\n" "  sam31 inspect MODEL.gguf [--allow-test-fixture] [--read-all]\n" "  sam31 manifest [--smoke]\n" "  sam31 synthetic --output DIR [--frames COUNT]\n" "Options: --threads N --cache-mb N --allow-test-fixture --ablate-memory --profile\n" "Coordinates are normalized [0,1]. LABEL is 1 (positive, default) or 0 (negative).\n" "One bucket supports 1..16 objects. Multiple points per ID are allowed.\n" "No Python, PyTorch, ONNX runtime or child process is used during inference.\n" "Test fixtures are UNTRAINED; smoke execution is not a segmentation accuracy test.\n";
     }
     size_t number(const std::string&s,size_t max,const std::string&what) {
         require(!s.empty()&&std::all_of(s.begin(),s.end(),[](unsigned char c) {
@@ -225,6 +225,10 @@ int main(int argc,char**argv) {
             const std::string key=args[i];
             if(key=="--allow-test-fixture") {
                 options.allow_test_fixture=true;
+                continue;
+            }
+            if(key=="--profile") {
+                options.profile=true;
                 continue;
             }
             if(key=="--ablate-memory") {

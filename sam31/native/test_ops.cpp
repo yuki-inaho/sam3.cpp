@@ -63,6 +63,21 @@ int main(int argc, char **argv) {
             item["elements"] = actual.v.size();
             results.push_back(item);
         }
+        // Exercise the production-sized parallel threshold without trained weights.
+        Tensor large(4096,1,weights.config.vit);
+        for(size_t i=0; i<large.v.size(); ++i)large.v[i]=float(int(i%127)-63)/16.0f;
+#ifdef _OPENMP
+        omp_set_num_threads(1);
+#endif
+        const auto serial_gelu=gelu(large);
+        const auto serial_norm=ops.norm(large,"backbone.vision_backbone.trunk.blocks.0.norm1",1e-6f);
+#ifdef _OPENMP
+        omp_set_num_threads(4);
+#endif
+        require(gelu(large).v==serial_gelu.v,"parallel GELU changes pointwise results");
+        require(ops.norm(large,"backbone.vision_backbone.trunk.blocks.0.norm1",1e-6f).v==serial_norm.v,
+                "parallel LayerNorm changes row results");
+        report["parallel_pointwise_byte_exact"] = true;
         report["cases"] = results;
         report["element_checks"] = checks;
         report["passed"] = true;

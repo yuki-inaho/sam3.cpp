@@ -92,6 +92,39 @@ class NativeCliTests(unittest.TestCase):
     def test_int8_token_embedding(self):
         self.checkpoint_variant(embedding=True)
 
+    def controlled_selection(self, stable):
+        source = SafeTensorFile(SOURCE / "fixtures/TEST_ONLY_native_sam31.safetensors")
+        tensors = {name: (info.dtype, source.array(name)) for name, info in source.tensors.items()}
+        prefix = "tracker.model.interactive_sam_mask_decoder"
+        # Independent controlled oracle: candidate 0 has stable large logits and
+        # quality 1000; multi-mask candidates have quality 100, 10, 1.
+        tensors[prefix + ".iou_prediction_head.layers.2.bias"] = ("F32", np.asarray([1000, 100, 10, 1], dtype=np.float32))
+        weight = prefix + ".output_hypernetworks_mlps.0.layers.2.weight"
+        dtype, value = tensors[weight]
+        tensors[weight] = (dtype, np.zeros_like(value))
+        bias = prefix + ".output_hypernetworks_mlps.0.layers.2.bias"
+        dtype, value = tensors[bias]
+        tensors[bias] = (dtype, np.full_like(value, 1e6 if stable else 0))
+        path = self.root / "selection.safetensors"
+        write_fixture(path, tensors, source.metadata)
+        gguf = self.root / "selection.gguf"
+        convert(path, gguf, allow_test_fixture=True)
+        args = self.image_args()
+        args[args.index("--model") + 1] = gguf
+        self.run_cli(*args, "--point", "1:0.05:0.05:0")
+        report = self.verify_outputs(self.root / "result", 1)
+        if stable:
+            self.assertGreater(report["frames"][0]["objects"][0]["quality"], 900)
+        else:
+            self.assertLess(report["frames"][0]["objects"][0]["quality"], 200)
+        self.assertLess(report["frames"][0]["objects"][1]["quality"], 200)
+
+    def test_multiple_points_select_stable_single_mask(self):
+        self.controlled_selection(stable=True)
+
+    def test_multiple_points_unstable_mask_falls_back(self):
+        self.controlled_selection(stable=False)
+
     def test_dedicated_image_binary_without_python(self) -> None:
         self.run_cli(*self.image_args()[1:], executable=BIN.with_name("sam31_image"))
         self.verify_outputs(self.root / "result", 1)

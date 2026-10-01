@@ -528,6 +528,12 @@ namespace sam31 {
             FIELD(two_way_blocks);
             FIELD(memory_blocks);
 #undef FIELD
+            if(profile) {
+                Json timings;
+                timings["linear_ms"]=linear_ms;timings["conv_ms"]=conv_ms;
+                timings["deconv_ms"]=deconv_ms;timings["attention_ms"]=attention_ms;
+                timings["norm_ms"]=norm_ms;j["operator_timings"]=timings;
+            }
             return j;
         }
     }

@@ -20,6 +20,7 @@ struct Options {
     size_t total_frames=16; // pointer temporal normalization; CLI supplies actual length
     size_t weight_cache_mb=128;
     int threads=1;
+    bool profile=false; // emit operator elapsed times in session stats
 };
 // Reusable pure-C++ model. Storage: GGUF I8/F16/BF16/F32. Compute: float32 CPU.
 // Every required tensor is checked before creating a session. No fallback weights.
