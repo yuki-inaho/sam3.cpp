@@ -38,6 +38,7 @@ enum sam3_model_type {
     SAM3_MODEL_SAM3_VISUAL = 1,  // SAM3 visual-only (ViT + tracker, no text)
     SAM3_MODEL_SAM2        = 2,  // SAM2 (Hiera + tracker, no text/detector)
     SAM3_MODEL_EDGETAM     = 3,  // EdgeTAM (RepViT + Perceiver, no text/detector)
+    SAM3_MODEL_EFFICIENTSAM3 = 4, // EV-M detector; no memory tracker weights
 };
 
 /*****************************************************************************
@@ -433,6 +434,10 @@ bool sam3_encode_image_from_preprocessed(sam3_state       & state,
                                           const sam3_model & model,
                                           const float      * chw_data,
                                           int                img_size);
+
+// EV-M fixed-resolution input with explicit original dimensions for mask output.
+bool sam3_encode_efficient_from_preprocessed(sam3_state & state, const sam3_model & model,
+        const float * chw, int original_width, int original_height);
 
 /*
 ** Test-only: run ONLY the ViT encoder from preprocessed float data and keep

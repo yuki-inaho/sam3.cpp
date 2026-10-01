@@ -1,0 +1,90 @@
+{
+  "passed": true,
+  "backend": "ggml-cpu",
+  "sequence_mode": "independent_detection",
+  "checkpoint_sha256": "086b04b2e7da7cc98aa4621b70c7291608aa9d187357b98d03bd4d6533ed5a17",
+  "source_revision": "bd0936c788fed8d51fa799437f05abd97b401b06",
+  "native_path": "/NO_EXECUTABLES",
+  "threads": 16,
+  "frames": [
+    {
+      "frame_index": 0,
+      "masks": [
+        {
+          "query_id": 44,
+          "iou": 0.9999624814752284,
+          "score_error": 6.597137447439394e-08,
+          "foreground_pixels": 53305
+        }
+      ],
+      "native_ms": 10884.8,
+      "reference_ms": 1521.8811901286244
+    },
+    {
+      "frame_index": 1,
+      "masks": [
+        {
+          "query_id": 44,
+          "iou": 0.9999627296783571,
+          "score_error": 4.544372558257237e-07,
+          "foreground_pixels": 53661
+        }
+      ],
+      "native_ms": 12157.5,
+      "reference_ms": 1509.929453022778
+    },
+    {
+      "frame_index": 2,
+      "masks": [
+        {
+          "query_id": 44,
+          "iou": 1.0,
+          "score_error": 6.567573547222594e-07,
+          "foreground_pixels": 54155
+        }
+      ],
+      "native_ms": 11983.1,
+      "reference_ms": 1618.0915071163327
+    },
+    {
+      "frame_index": 3,
+      "masks": [
+        {
+          "query_id": 44,
+          "iou": 1.0,
+          "score_error": 1.5655136109682388e-07,
+          "foreground_pixels": 53949
+        }
+      ],
+      "native_ms": 11917.1,
+      "reference_ms": 1573.901565046981
+    },
+    {
+      "frame_index": 4,
+      "masks": [
+        {
+          "query_id": 44,
+          "iou": 1.0,
+          "score_error": 7.543334961113146e-07,
+          "foreground_pixels": 53166
+        }
+      ],
+      "native_ms": 12022.5,
+      "reference_ms": 1460.3589931502938
+    },
+    {
+      "frame_index": 5,
+      "masks": [
+        {
+          "query_id": 44,
+          "iou": 0.9999812143071837,
+          "score_error": 4.453239440538326e-07,
+          "foreground_pixels": 53231
+        }
+      ],
+      "native_ms": 12077.7,
+      "reference_ms": 1493.6457071453333
+    }
+  ],
+  "native_sequence_process_ms": 71845.6288878806
+}

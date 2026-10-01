@@ -14,6 +14,9 @@ target_link_libraries(sam3_profile_edgetam PRIVATE sam3)
 add_executable(sam3_seg sam3_seg.cpp)
 target_link_libraries(sam3_seg PRIVATE sam3)
 
+add_executable(efficientsam3 efficientsam3.cpp)
+target_link_libraries(efficientsam3 PRIVATE sam3)
+
 add_executable(sam3_serve sam3_serve.cpp)
 target_link_libraries(sam3_serve PRIVATE sam3)
 

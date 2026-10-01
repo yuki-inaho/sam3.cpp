@@ -69,102 +69,102 @@ docs/ONBOARDING.md と機能 guide を更新、公開情報検査、zstd 梱包�
 - [x] 🛠 **エラー時対処**: README と example が異なる場合は実重みの shapes を優先して次の inventory に残す。
 
 ### 手順 2: CPU uv 環境の作成（E1/E2）
-- [ ] 🖐 **操作**: ONNX repo の `efficientsam3/pyproject.toml` に CPU torch/torchvision と export/test 依存を定義し `uv sync --project efficientsam3` を実行する。
-- [ ] 🔎 **確認**: CUDA wheel に依存せず torch、ONNX、ORT、pytest を import できる。
-- [ ] 🧪 **テスト**: `uv run --project efficientsam3 python -c 'import torch, onnx, onnxruntime; print(torch.__version__)'`。
-- [ ] 🛠 **エラー時対処**: CPU index の互換 torch/vision を固定する。未確認の root uv sync を実行しない。
+- [x] 🖐 **操作**: ONNX repo の `efficientsam3/pyproject.toml` に CPU torch/torchvision と export/test 依存を定義し `uv sync --project efficientsam3` を実行する。
+- [x] 🔎 **確認**: CUDA wheel に依存せず torch、ONNX、ORT、pytest を import できる。
+- [x] 🧪 **テスト**: `uv run --project efficientsam3 python -c 'import torch, onnx, onnxruntime; print(torch.__version__)'`。
+- [x] 🛠 **エラー時対処**: CPU index の互換 torch/vision を固定する。未確認の root uv sync を実行しない。
 
 ### 手順 3: 実重み inventory の保存（E1）
-- [ ] 🖐 **操作**: `weights_only=True` で checkpoint の tensor keys/shapes/count を `outputs/efficientsam3/inventory.json` に保存する。
-- [ ] 🔎 **確認**: model SHA256 `086b04b2e7da7cc98aa4621b70c7291608aa9d187357b98d03bd4d6533ed5a17`、サイズ468394477 bytes、学生モデルと tracker 有無が分かる。
-- [ ] 🧪 **テスト**: checksum 不一致なら export を拒否する仕様を設計する。pickle unrestricted load を行わない。
-- [ ] 🛠 **エラー時対処**: checkpoint の wrapper は dict のみ受理し metadata の private 値を出力しない。
+- [x] 🖐 **操作**: `weights_only=True` で checkpoint の tensor keys/shapes/count を `outputs/efficientsam3/inventory.json` に保存する。
+- [x] 🔎 **確認**: model SHA256 `086b04b2e7da7cc98aa4621b70c7291608aa9d187357b98d03bd4d6533ed5a17`、サイズ468394477 bytes、学生モデルと tracker 有無が分かる。
+- [x] 🧪 **テスト**: checksum 不一致なら export を拒否する仕様を設計する。pickle unrestricted load を行わない。
+- [x] 🛠 **エラー時対処**: checkpoint の wrapper は dict のみ受理し metadata の private 値を出力しない。
 
 ### 手順 4: 参照モデルの必須重み検査（E1）
-- [ ] 🖐 **操作**: 固定 source から参照モデルを構築し必須キー/shape/余分キーを照合する。
-- [ ] 🔎 **確認**: text 種別/context、vision neck、共有 PCS、tracker 有無を確定する。
-- [ ] 🧪 **テスト**: 必須キーを1つ除いた入力が失敗する。strict=False の warning だけで成功としない。
-- [ ] 🛠 **エラー時対処**: 構築依存は import trace を見て CPU project に必要分だけ追加する。
+- [x] 🖐 **操作**: 固定 source から参照モデルを構築し必須キー/shape/余分キーを照合する。
+- [x] 🔎 **確認**: text 種別/context、vision neck、共有 PCS、tracker 有無を確定する。
+- [x] 🧪 **テスト**: 必須キーを1つ除いた入力が失敗する。strict=False の warning だけで成功としない。
+- [x] 🛠 **エラー時対処**: 構築依存は import trace を見て CPU project に必要分だけ追加する。
 
 ### フェーズ2：設計
 
 ### 手順 5: 実装仕様の追記と再レビュー（E1/E2/E3）
-- [ ] 🖐 **操作**: 本書の第8章へ入出力、GGUF mapping、動画機能範囲、具体的な追加テストを記載する。
-- [ ] 🔎 **確認**: 実装順、段階別比較、失敗条件が source と inventory に一致する。
-- [ ] 🧪 **テスト**: review-written-workdoc の再判定が PASS、未確定の必須仕様がない。
-- [ ] 🛠 **エラー時対処**: tracker が無い場合は frame sequence 検出を明示し、メモリ追跡の要件は追加重み/設計を別項目で定義する。
+- [x] 🖐 **操作**: 本書の第8章へ入出力、GGUF mapping、動画機能範囲、具体的な追加テストを記載する。
+- [x] 🔎 **確認**: 実装順、段階別比較、失敗条件が source と inventory に一致する。
+- [x] 🧪 **テスト**: review-written-workdoc の再判定が PASS、未確定の必須仕様がない。
+- [x] 🛠 **エラー時対処**: tracker が無い場合は frame sequence 検出を明示し、メモリ追跡の要件は追加重み/設計を別項目で定義する。
 
 ### フェーズ3：実装
 
 ### 手順 6: ONNX loading 境界テスト（E2）
-- [ ] 🖐 **操作**: `efficientsam3/tests/test_contract.py` に不足キー/shape/誤モデルの拒否テストを追加する。
-- [ ] 🔎 **確認**: 未実装の loader に対してテストが red になる。
-- [ ] 🧪 **テスト**: `uv run --project efficientsam3 pytest efficientsam3/tests/test_contract.py -q`。
-- [ ] 🛠 **エラー時対処**: テスト収集失敗と期待する仕様失敗を区別する。
+- [x] 🖐 **操作**: `efficientsam3/tests/test_contract.py` に不足キー/shape/誤モデルの拒否テストを追加する。
+- [x] 🔎 **確認**: 未実装の loader に対してテストが red になる。
+- [x] 🧪 **テスト**: `uv run --project efficientsam3 pytest efficientsam3/tests/test_contract.py -q`。
+- [x] 🛠 **エラー時対処**: テスト収集失敗と期待する仕様失敗を区別する。
 
 ### 手順 7: ONNX exporter の実装（E2）
-- [ ] 🖐 **操作**: `efficientsam3/export.py` に固定仕様の段階別 export と manifest を実装する。
-- [ ] 🔎 **確認**: 全必須重み検査に合格したものだけを export する。
-- [ ] 🧪 **テスト**: 手順6が green。実 export の ONNX checker が成功する。
-- [ ] 🛠 **エラー時対処**: 未対応 operator を source の等価実数演算へ明示変換し変更を記録する。
+- [x] 🖐 **操作**: `efficientsam3/export.py` に固定仕様の段階別 export と manifest を実装する。
+- [x] 🔎 **確認**: 全必須重み検査に合格したものだけを export する。
+- [x] 🧪 **テスト**: 手順6が green。実 export の ONNX checker が成功する。
+- [x] 🛠 **エラー時対処**: 未対応 operator を source の等価実数演算へ明示変換し変更を記録する。
 
 ### 手順 8: ORT runner の実装（E2）
-- [ ] 🖐 **操作**: `efficientsam3/runtime.py` に image と frame sequence 推論を実装する。
-- [ ] 🔎 **確認**: runtime は torch を import せず ORT CPU session で処理する。
-- [ ] 🧪 **テスト**: frame順/空入力/サイズ不正/誤manifestを拒否するテストが green。
-- [ ] 🛠 **エラー時対処**: stage の layout と dtype を manifest と照合する。
+- [x] 🖐 **操作**: `efficientsam3/runtime.py` に image と frame sequence 推論を実装する。
+- [x] 🔎 **確認**: runtime は torch を import せず ORT CPU session で処理する。
+- [x] 🧪 **テスト**: frame順/空入力/サイズ不正/誤manifestを拒否するテストが green。
+- [x] 🛠 **エラー時対処**: stage の layout と dtype を manifest と照合する。
 
 ### 手順 9: ONNX 実重み比較（E2/E4）
-- [ ] 🖐 **操作**: `efficientsam3/tests/test_real_e2e.py` を実行し oracle report を保存する。
-- [ ] 🔎 **確認**: 画像と6フレームで非空の有効なマスク、参照との IoU >=0.90、finite、時間を確認。
-- [ ] 🧪 **テスト**: stage差分と最終 mask 比較を両方保存。モデル未配置は明示 skip し実検証完了とは扱わない。
-- [ ] 🛠 **エラー時対処**: 最初にずれる stage を特定して手順7/8を修正する。
+- [x] 🖐 **操作**: `efficientsam3/tests/test_real_e2e.py` を実行し oracle report を保存する。
+- [x] 🔎 **確認**: 画像と6フレームで非空の有効なマスク、参照との IoU >=0.90、finite、時間を確認。
+- [x] 🧪 **テスト**: stage差分と最終 mask 比較を両方保存。モデル未配置は明示 skip し実検証完了とは扱わない。
+- [x] 🛠 **エラー時対処**: 最初にずれる stage を特定して手順7/8を修正する。
 
 ### 手順 10: GGUF 変換境界テスト（E3）
-- [ ] 🖐 **操作**: C++ repo に `tests/test_efficientsam3_conversion.py` を追加する。
-- [ ] 🔎 **確認**: モデル種別/必須tensor/shape/metadata 不正の red を観測する。
-- [ ] 🧪 **テスト**: CPU uv 環境を明示して pytest を実行する。
-- [ ] 🛠 **エラー時対処**: synthetic fixture と trained model を明確に分けて期待値を作る。
+- [x] 🖐 **操作**: C++ repo に `tests/test_efficientsam3_conversion.py` を追加する。
+- [x] 🔎 **確認**: モデル種別/必須tensor/shape/metadata 不正の red を観測する。
+- [x] 🧪 **テスト**: CPU uv 環境を明示して pytest を実行する。
+- [x] 🛠 **エラー時対処**: synthetic fixture と trained model を明確に分けて期待値を作る。
 
 ### 手順 11: GGUF converter の実装（E3）
-- [ ] 🖐 **操作**: `convert_efficientsam3_to_gguf.py` に重みと仕様の保存を実装する。
-- [ ] 🔎 **確認**: runtime が必要な全 tensor を保存、metadata に variant/source revision/context を記録する。
-- [ ] 🧪 **テスト**: 手順10が green、実重み tensor payload の照合成功。
-- [ ] 🛠 **エラー時対処**: 意図的な BN fusion 等は式と数値比較を記録、黙って tensor を除外しない。
+- [x] 🖐 **操作**: `convert_efficientsam3_to_gguf.py` に重みと仕様の保存を実装する。
+- [x] 🔎 **確認**: runtime が必要な全 tensor を保存、metadata に variant/source revision/context を記録する。
+- [x] 🧪 **テスト**: 手順10が green、実重み tensor payload の照合成功。
+- [x] 🛠 **エラー時対処**: 意図的な BN fusion 等は式と数値比較を記録、黙って tensor を除外しない。
 
 ### 手順 12: C++ 学生 encoder と loader の実装（E3）
-- [ ] 🖐 **操作**: `sam3.cpp`/`sam3.h` に EfficientSAM3 のロードと段階別 ggml graph を追加する。
-- [ ] 🔎 **確認**: vision/text/PCS 必須重みを検証してから compute する。Python/ORT 推論への委譲がない。
-- [ ] 🧪 **テスト**: operator/stage 参照比較と malformed GGUF 拒否、既存 build を確認する。
-- [ ] 🛠 **エラー時対処**: shape/layout の小さい oracle から切り分け、graph ごとに CPU buffer を受け渡す。
+- [x] 🖐 **操作**: `sam3.cpp`/`sam3.h` に EfficientSAM3 のロードと段階別 ggml graph を追加する。
+- [x] 🔎 **確認**: vision/text/PCS 必須重みを検証してから compute する。Python/ORT 推論への委譲がない。
+- [x] 🧪 **テスト**: operator/stage 参照比較と malformed GGUF 拒否、既存 build を確認する。
+- [x] 🛠 **エラー時対処**: shape/layout の小さい oracle から切り分け、graph ごとに CPU buffer を受け渡す。
 
 ### 手順 13: C++ 実モデル image/sequence E2E（E3/E4）
-- [ ] 🖐 **操作**: headless CLI を使い同じ実画像/6フレームで native output を保存する。
-- [ ] 🔎 **確認**: PyTorch/ORT と mask IoU >=0.90、finite、入力依存、再現性を満たす。
-- [ ] 🧪 **テスト**: 外部プログラムを起動できない PATH で native 推論を実行して証明する。
-- [ ] 🛠 **エラー時対処**: 共有 PCS stage と学生 stage を別々に比較して修正する。
+- [x] 🖐 **操作**: headless CLI を使い同じ実画像/6フレームで native output を保存する。
+- [x] 🔎 **確認**: PyTorch/ORT と mask IoU >=0.90、finite、入力依存、再現性を満たす。
+- [x] 🧪 **テスト**: 外部プログラムを起動できない PATH で native 推論を実行して証明する。
+- [x] 🛠 **エラー時対処**: 共有 PCS stage と学生 stage を別々に比較して修正する。
 
 ### フェーズ4：検証
 
 ### 手順 14: 性能計測（E4）
-- [ ] 🖐 **操作**: 同一入力/スレッド数で stage時間/全体時間/モデル容量を計測する。
-- [ ] 🔎 **確認**: 実測値が report にあり、最適化した場合は同一結果と前後時間がある。
-- [ ] 🧪 **テスト**: 修正後の数値/マスク比較を再実行する。
-- [ ] 🛠 **エラー時対処**: ボトルネックを特定してから変更する。近似を無断追加しない。
+- [x] 🖐 **操作**: 同一入力/スレッド数で stage時間/全体時間/モデル容量を計測する。
+- [x] 🔎 **確認**: 実測値が report にあり、最適化した場合は同一結果と前後時間がある。
+- [x] 🧪 **テスト**: 修正後の数値/マスク比較を再実行する。
+- [x] 🛠 **エラー時対処**: ボトルネックを特定してから変更する。近似を無断追加しない。
 
 ### 手順 15: 回帰・品質ゲート（E4）
-- [ ] 🖐 **操作**: 各 repo の既存 model-free tests、新規 tests、CMake build、対象 lint/format を実行する。
-- [ ] 🔎 **確認**: SAM31 CTest `-LE real` と ONNX 新規 tests が成功し、既存 API の互換を確認する。
-- [ ] 🧪 **テスト**: 実行 command と exit code を保存する。
-- [ ] 🛠 **エラー時対処**: 既存環境の不足と今回の回帰を分離して記録する。
+- [x] 🖐 **操作**: 各 repo の既存 model-free tests、新規 tests、CMake build、対象 lint/format を実行する。
+- [x] 🔎 **確認**: SAM31 CTest `-LE real` と ONNX 新規 tests が成功し、既存 API の互換を確認する。
+- [x] 🧪 **テスト**: 実行 command と exit code を保存する。
+- [x] 🛠 **エラー時対処**: 既存環境の不足と今回の回帰を分離して記録する。
 
 ### フェーズ5：公開
 
 ### 手順 16: 導入手順の更新（E5）
-- [ ] 🖐 **操作**: 両 repo の `docs/ONBOARDING.md` と EfficientSAM3 guide に download→convert/export→image/sequence→test を記載する。
-- [ ] 🔎 **確認**: パス/モデル/variant が一貫し、空環境で必要な source/deps が分かる。
-- [ ] 🧪 **テスト**: docs のコマンドを clean output directory で実行確認する。
-- [ ] 🛠 **エラー時対処**: 固定 revision と public URL を用い、token や利用者の絶対パスを保存しない。
+- [x] 🖐 **操作**: 両 repo の `docs/ONBOARDING.md` と EfficientSAM3 guide に download→convert/export→image/sequence→test を記載する。
+- [x] 🔎 **確認**: パス/モデル/variant が一貫し、空環境で必要な source/deps が分かる。
+- [x] 🧪 **テスト**: docs のコマンドを clean output directory で実行確認する。
+- [x] 🛠 **エラー時対処**: 固定 revision と public URL を用い、token や利用者の絶対パスを保存しない。
 
 ### 手順 17: zstd 成果物の復元検査（E5）
 - [ ] 🖐 **操作**: source/artifacts を追跡対象と明示 evidence から梱包し復元検査する。
@@ -229,7 +229,33 @@ git diff --check
 | --- | --- | --- | --- | --- |
 | 2026-10-01 | 09:53 JST+0900 | Codex | 前作業完了後、手順1開始 | SAM31 PR#2 merged、両 feature branch を準備、固定 source/HF metadata を取得。開始時刻は前の date 記録を参照した分単位の記録。 |
 | 2026-10-01 | 09:56:50 JST+0900 | Codex | 手順1完了 | EV-M Stage3 実重み SHA 一致。README と source を調査、b1 確定。text と tracker は次に実重みで検査する。 |
+| 2026-10-01 | 10:02:52 JST+0900 | Codex | 手順2/3完了、手順4開始 | CPU torch 2.7.0+cpu/ORT/ONNX import成功。実重み799 tensors/97455649 elements、MobileCLIP-S0 context16、trackerなし。private trainer metadataは保存しない。参照 import は動画backend未配置で失敗したため必要依存opencvを明示追加。 |
+| 2026-10-01 | 10:05:51 JST+0900 | Codex | 手順4完了・手順5設計記入 | strict load799/799成功、97435030params。S0/context16とtrackerなしを確定。upstreamの部分ロードhelperは利用しない。 |
+| 2026-10-01 | 10:06:29 JST+0900 | Codex | 手順5完了・手順6開始 | 入出力・必須799keys・S0ctx16・tracker無しframe sequence・GGUF mapを確定。再レビューPASS。新規contractの不足/shape/extra/checksum拒否を先に追加する。 |
+| 2026-10-01 | 10:14:25 JST+0900 | Codex | 手順6–8完了・手順9実行中 | 未実装contract importでred、境界7 tests green。vision/text/groundingの実exportとchecker成功。runtime正常/異常/torch非importを含む15 tests green。公開dog画像の実検出1 maskをPNG出力、ORT約1547ms。6frame比較の最初2frame IoU1.0。 |
+| 2026-10-01 | 10:26:21 JST+0900 | Codex | 手順9–11完了・手順12開始 | ONNX6frames全mask IoU1.0。GGUF799payload/389822768 bytes完全一致。変換境界5 tests green。学生vision/text・strictGGUFloaderを実装しC++ library build成功。既存PCS接続を実モデルCLIで検証する。 |
+| 2026-10-01 | 10:41:28 JST+0900 | Codex | 手順12完了・手順13追加検証/14計測中 | native実画像IoU0.999993、6個別frame最小IoU0.999962。GGUF799契約、native loader拒否/CLI境界12tests成功。DWは固定ggmlのF32 direct kernelを使用。S0にはrbr_scale branchが無いことをspecに合わせ修正。連続CLIのstate再利用を追加検証し、grouped1×1をbatchedGEMMへ集約して計測する。 |
+| 2026-10-01 | 10:53:18 JST+0900 | Codex | 手順13完了・手順14/15実行 | native実モデルpytest1 passed、6frame最小IoU0.999962、外部実行不可PATH。一般preprocessed APIのdispatch、visual tracker拒否と解放順を修正。CTest5groupsと境界12tests成功。速度改善案は16threadsで明確な改善なし、stage profileを続ける。ONNX既存model-free36 passed/19 skipped、実checkpoint必須の別4件は未配置で失敗したため回帰成功に数えない。 |
+
+| 2026-10-01 | 10:56:06 JST+0900 | Codex | 手順14–16完了・手順17開始 | profile16threads10949.7ms、4threads9751.2ms、PNG byte一致。grouped batched案は遅く採用せず。1×1はim2colを省く等価行列積。6frameはdistinct output、frame0再実行PNG一致。最終CTest5/5、境界12 passed/1 skip、ruff成功。ONNXmodel-free36 passed/19 skip。両ONBOARDING/guide整備、native default fetchと通常画像CLI実行成功。公開reportをdocsへ保存しzstd梱包復元へ進む。 |
 
 ## 8. 設計ゲート
 
-未確定：text backbone/context、必須 tensor、tracker の有無、stage 入出力。手順3–5で確定してから実装する。
+### 確定した仕様（E1）
+
+- EV-M: EfficientViT b1 + projection head(256→1024、BN、GELU、3×3) + bilinear72×72 + SAM3 detector FPN(288/144/72)。MobileCLIP-S0（前後RepMixer＋4 transformer blocks、512幅、8heads、context16、非causal）＋256 projector。
+- 固定 builder の `build_efficientsam3_image_model(backbone_type="efficientvit", model_name="b1", text_encoder_type="MobileCLIP-S0", text_encoder_context_length=16, checkpoint_path=None, load_from_HF=False, device="cpu")` を構築してから `model.load_state_dict(state, strict=True)` を実施する。upstream helper は非prefix checkpointを落とすため使用しない。
+- 実検査: expected/actual799 keys、missing/extra/shape mismatch各0。parameter97435030、bufferを含むelements97455649。READMEの89.2Mと異なる実測値を正確に記載する。
+- tracker/memory重みはない。動画は各フレームでEV-Mの実検出を実行するframe sequence annotation。SAM31メモリ追跡APIと混同せず、manifestのsequence_modeをindependent_detectionに固定する。
+
+### ONNX 設計（E2）
+
+`efficientsam3/contract.py`: public model/source identity、SHA検査、strict state validation。`fetch.py`: fixed source checkoutとpublicモデル取得。`reference.py`: CPU builder、export wrappers。`export.py`: vision(image1×3×1008×1008→fpn0/1/2、pe0/1/2)、text(tokens1×16→features16×1×256、mask1×16)、grounding(fpn0/1/2、text/mask→boxes1×200×4、logits1×200×1、presence1×1、masks1×200×288×288)。最初は固定batch/resolution/context。torch tensor tokenizationは外部BPE tokenizerに分離する。`runtime.py`: torch非依存ORT/NumPy/Pillow、imageと明示順序のframe paths、PNG/JSON出力。`just efficient-fetch/export/test/run`をCPUproject向けに追加する。
+
+### C++ 設計（E3）
+
+`convert_efficientsam3_to_gguf.py`: checkpointの学生vision/text tensorはev/et prefix、PCS共通tensorは既存rename_keyと同じ名前で保存。F32で開始して量子化の比較誤差を避ける。BN fusionが必要な場合は式と照合を保存する。`sam3.cpp`: GGUF loader、学生重み、段階ごとのgraph、既存geometry/fusion/DETR/seg headへの接続。`sam3.h`: EfficientSAM3 enum。`examples/efficientsam3.cpp`: headless image/sequence CLI。source/revision/context/tokenizerをGGUFへ格納する。trackerなしのmodelではPVS/tracker entry pointを明示拒否する。
+
+### テスト設計（E4）
+
+`test_contract.py`: checksum/不足キー/誤shape/余分キー/非tensor拒否。`test_real_e2e.py`:固定実重みでvision/text/groundingの数値差分、最終選択マスクIoU>=0.90、6frameで同等検査。nativeは各stageのraw dumpを比較し最初の差分を診断する。画像には公開参照assetか人工形状を用い、非空検出が得られる入力を固定する。必要な場合ユーザーのprivate画像は使わない。

@@ -1,0 +1,7 @@
+{
+  "passed": true,
+  "tensor_count": 799,
+  "payload_bytes": 389822768,
+  "checkpoint_sha256": "086b04b2e7da7cc98aa4621b70c7291608aa9d187357b98d03bd4d6533ed5a17",
+  "source_revision": "bd0936c788fed8d51fa799437f05abd97b401b06"
+}
