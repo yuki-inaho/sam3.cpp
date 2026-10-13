@@ -16,6 +16,8 @@ target_link_libraries(sam3_seg PRIVATE sam3)
 
 add_executable(sam3_serve sam3_serve.cpp)
 target_link_libraries(sam3_serve PRIVATE sam3)
+add_executable(sam3_track_batch sam3_track_batch.cpp)
+target_link_libraries(sam3_track_batch PRIVATE sam3)
 
 # SDL2 + ImGui are optional — build only if SDL2 AND OpenGL are found.
 find_package(SDL2 QUIET)

@@ -19,8 +19,8 @@
     <section>
       <h2>モデル</h2>
       <div class="row">
-        <input id="modelPath" type="text" placeholder="models/edgetam_q8_0.ggml"
-               value="models/edgetam_q8_0.ggml">
+        <input id="modelPath" type="text" placeholder="/path/to/model.gguf または model.ggml"
+               value="">
         <button type="button" id="browseModel" class="ghost" title="参照">…</button>
       </div>
       <label class="check"><input id="cpu" type="checkbox" checked> CPU を使う</label>
@@ -29,11 +29,21 @@
       </label>
       <button type="button" id="startModel" class="primary">モデル開始</button>
       <p class="hint">読み込みと画像エンコードに数秒かかります。以降のプロンプトは高速です。</p>
+      <p id="modelCapabilities" class="hint" role="status">モデル未読み込み。推論結果は確認前の下書きです。</p>
+      <p id="cacheStatus" class="hint" role="status">キャッシュ統計: モデル未読み込み</p>
+      <button type="button" id="refreshCacheStats" class="ghost">キャッシュ統計を更新</button>
     </section>
 
     <section>
-      <h2>画像</h2>
+      <h2>動画・フレーム</h2>
       <button type="button" id="openImage">画像を開く</button>
+      <select id="frameSelect" aria-label="フレーム"></select>
+      <div class="row"><button id="previousFrame">前</button><button id="nextFrame">次</button></div>
+      <p id="unresolvedStatus" class="hint" role="status"></p>
+      <p id="sequenceStatus" class="hint">シーケンス未選択</p>
+      <button id="propagate">同じ Fruit ID で後続フレームへ伝播</button>
+      <div class="row"><button id="cancel">処理を停止</button><button id="resetTracking">追跡リセット</button></div>
+      <p class="hint">ID はシーケンス全体で保持。遮蔽・見失いは未解決として残し、自動で別の果実に再割当てしません。</p>
       <button type="button" id="fit" class="ghost">全体表示</button>
     </section>
 
@@ -54,8 +64,9 @@
       </div>
       <div id="candidates" class="chips"></div>
       <div class="row">
-        <input id="label" type="text" placeholder="ラベル名" value="object">
-        <button type="button" id="accept" class="primary" disabled>確定 <kbd>↵</kbd></button>
+        <input id="fruitId" type="number" min="1" max="2147483647" placeholder="Fruit ID (空欄=新規)" aria-label="Fruit ID">
+        <input id="label" type="text" placeholder="ラベル名" value="tomato">
+        <button type="button" id="accept" class="primary" disabled>下書き保存 <kbd>↵</kbd></button>
       </div>
     </section>
 
@@ -65,18 +76,23 @@
     </section>
 
     <section class="footer">
+      <div class="row"><button id="saveProject">保存</button><button id="importProject">再読込</button></div>
+      <button id="restoreSaved">保存済みを開く</button>
+      <input id="projectFile" type="file" accept="application/json,.json" hidden>
       <button type="button" id="export" class="primary" disabled>COCO を書き出す</button>
     </section>
   </aside>
 
   <div class="stage">
-    <p id="browserNote" class="browser-note">この画面はブラウザで開かれています。画像の読み込みと SAM セグメンテーションはデスクトップ版 (Tauri) でのみ動作します。</p>
+    <p id="browserNote" class="browser-note">この静的ページには推論バックエンドがありません。専用のローカルサーバーまたは Tauri 版で開いてください。</p>
     <canvas id="canvas"></canvas>
   </div>
 </main>
 
 <script src="rle.js"></script>
 <script src="coco.js"></script>
+<script src="project.js"></script>
+<script src="tracking.js"></script>
 <script src="bridge.js"></script>
 <script src="app.js"></script>
 </body>

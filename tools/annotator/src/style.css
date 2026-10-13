@@ -178,3 +178,9 @@ body.busy .panel button:disabled { opacity: .35; }
   background: var(--panel);
   box-shadow: 0 -8px 12px -8px rgba(0, 0, 0, .8);
 }
+
+select { color: var(--fg); background: #232935; border: 1px solid var(--line); border-radius: 6px; padding: 6px; min-width: 0; }
+.layout { grid-template-columns: 340px 1fr; }
+#fruitId { width: 105px; min-width: 85px; }
+.review { font-size: 10px; padding: 3px; }
+#sequenceStatus { overflow-wrap: anywhere; }

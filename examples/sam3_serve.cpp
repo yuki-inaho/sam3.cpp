@@ -27,6 +27,7 @@
 
 #include "sam3.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -151,10 +152,38 @@ static std::string sam3_mask_to_rle(const sam3_mask & mask) {
     return out;
 }
 
+static void sam3_reply_tracking(const char* event, int frame, int object_id,
+        int width, int height, const sam3_result& result) {
+    printf("{\"ok\":true,\"event\":\"%s\",\"frame_index\":%d,\"object_id\":%d,\"width\":%d,\"height\":%d,\"detections\":[",
+        event,frame,object_id,width,height);
+    for(size_t i=0;i<result.detections.size();++i) {
+        const auto& d=result.detections[i];
+        if(i) printf(",");
+        const bool absent=std::none_of(d.mask.data.begin(),d.mask.data.end(),[](uint8_t value){return value>0;});
+        printf("{\"instance_id\":%d,\"object_id\":%d,\"score\":%.8g,\"iou\":%.8g,\"object_logit\":%.8g,"
+               "\"box\":[%.3f,%.3f,%.3f,%.3f],\"mask_size\":[%d,%d],\"counts\":%s,\"absent\":%s}",
+               object_id,object_id,d.score,d.iou_score,d.object_logit,
+               d.box.x0,d.box.y0,d.box.x1,d.box.y1,d.mask.width,d.mask.height,sam3_mask_to_rle(d.mask).c_str(),absent?"true":"false");
+    }
+    printf("]}\n"); fflush(stdout);
+}
+
 int main(int argc, char** argv) {
+    if(argc==2 && std::string(argv[1])=="--runtime-provenance") {
+        std::string json,error;
+        if(!sam3_get_runtime_identity(json,error)) { sam3_reply_error(error); return 1; }
+        printf("%s\n",json.c_str()); return 0;
+    }
     std::string model_path;
     int  n_threads = 4;
     bool use_gpu   = true;
+    bool experimental_video = false;
+    bool efficient_image_only = false;
+    bool experimental_q8 = false;
+    bool prefix_cache = false;
+    bool fpn_cache = false;
+    std::string prefix_cache_directory;
+    uint64_t prefix_cache_budget = 0;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
@@ -163,6 +192,22 @@ int main(int argc, char** argv) {
             n_threads = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--cpu") == 0) {
             use_gpu = false;
+        } else if (strcmp(argv[i], "--efficient-prefix-cache") == 0) {
+            prefix_cache = true;
+        } else if (strcmp(argv[i], "--efficient-fpn-cache") == 0) {
+            fpn_cache = true;
+        } else if (strcmp(argv[i], "--prefix-cache-dir") == 0 && i+1<argc) {
+            prefix_cache_directory=argv[++i]; prefix_cache=true;
+        } else if (strcmp(argv[i], "--prefix-cache-budget-mib") == 0 && i+1<argc) {
+            prefix_cache_budget=std::strtoull(argv[++i],nullptr,10);
+            if(prefix_cache_budget>1024*1024) { fprintf(stderr,"Cache budget exceeds 1TiB\n"); return 1; }
+            prefix_cache_budget*=1024*1024;
+        } else if (strcmp(argv[i], "--experimental-efficient-q8-0") == 0) {
+            experimental_q8 = true;
+        } else if (strcmp(argv[i], "--efficient-image-only") == 0) {
+            efficient_image_only = true;
+        } else if (strcmp(argv[i], "--experimental-efficient-video") == 0) {
+            experimental_video = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             return 0;
@@ -183,6 +228,13 @@ int main(int argc, char** argv) {
     params.model_path = model_path;
     params.n_threads  = n_threads;
     params.use_gpu    = use_gpu;
+    params.experimental_efficient_video = experimental_video;
+    params.efficient_video_preprocessing = !efficient_image_only;
+    params.experimental_efficient_q8_0 = experimental_q8;
+    params.efficient_prefix_cache=prefix_cache;
+    params.efficient_fpn_cache=fpn_cache;
+    params.efficient_cache_directory=prefix_cache_directory;
+    params.efficient_cache_disk_budget=prefix_cache_budget;
 
     auto model = sam3_load_model(params);
     if (!model) {
@@ -198,14 +250,23 @@ int main(int argc, char** argv) {
 
     // Announce readiness so the caller does not have to guess when the (slow)
     // model load has finished.
-    printf("{\"ok\":true,\"event\":\"ready\",\"model_type\":%d}\n",
-           (int)sam3_get_model_type(*model));
+    const bool efficient = sam3_get_model_type(*model) == SAM3_MODEL_EFFICIENT_SAM2;
+    printf("{\"ok\":true,\"event\":\"ready\",\"model_type\":%d,"
+           "\"video_tracking\":%s,\"compute\":\"%s\",\"image_mode\":\"%s\",\"experimental_video\":%s,\"preprocessing\":\"%s\",\"build_identity\":\"%s\",\"runtime_provenance\":%s}\n",
+           (int)sam3_get_model_type(*model), sam3_supports_video_tracking(*model) ? "true" : "false",
+           efficient ? (experimental_q8 ? "experimental_ggml_q8_0_cpu" : "restored_fp32_cpu") : "ggml", efficient ? "efficient_packed_windows" : "standard",
+           experimental_video ? "true" : "false",
+           sam3_get_preprocessing(*model).c_str(), sam3_get_build_identity().c_str(),
+           sam3_get_model_runtime_identity(*model).c_str());
     fflush(stdout);
 
     bool            have_image = false;
     int             img_w = 0, img_h = 0;
     std::string     loaded_path;
     sam3_pvs_params pending;
+    sam3_tracker_ptr tracker;
+    int tracked_object_id = -1;
+    int sequence_length=0, source_start_frame=0;
 
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -217,6 +278,18 @@ int main(int argc, char** argv) {
             printf("{\"ok\":true,\"event\":\"bye\"}\n");
             fflush(stdout);
             break;
+        }
+
+        if(cmd=="cache_stats") {
+            const auto stats=sam3_get_prefix_cache_statistics(*model);
+            const auto full=sam3_get_fpn_cache_statistics(*model);
+            printf("{\"ok\":true,\"event\":\"cache_stats\",\"enabled\":%s,\"ram_hits\":%llu,\"disk_hits\":%llu,\"misses\":%llu,\"invalid_entries\":%llu,\"writes\":%llu,\"evictions\":%llu,\"resident_bytes\":%llu,\"disk_bytes\":%llu,\"full_encoder\":{\"enabled\":%s,\"hits\":%llu,\"misses\":%llu,\"evictions\":%llu,\"resident_bytes\":%llu}}\n",
+                stats.enabled?"true":"false",(unsigned long long)stats.ram_hits,(unsigned long long)stats.disk_hits,
+                (unsigned long long)stats.misses,(unsigned long long)stats.invalid_entries,(unsigned long long)stats.writes,
+                (unsigned long long)stats.evictions,(unsigned long long)stats.resident_bytes,(unsigned long long)stats.disk_bytes,
+                full.enabled?"true":"false",(unsigned long long)full.hits,(unsigned long long)full.misses,
+                (unsigned long long)full.evictions,(unsigned long long)full.resident_bytes);
+            fflush(stdout); continue;
         }
 
         if (cmd == "load") {
@@ -242,8 +315,12 @@ int main(int argc, char** argv) {
             img_h       = 0;
             loaded_path.clear();
             pending     = sam3_pvs_params();
+            tracker.reset();
+            sequence_length=0; source_start_frame=0;
+            state=sam3_create_state(*model,params); // New still image resets temporal window routing.
+            if(!state) { sam3_reply_error("load: cannot create image state"); continue; }
 
-            sam3_image image = sam3_load_image(path);
+            sam3_image image = sam3_load_image_for_model(path,*model);
             if (image.data.empty()) {
                 sam3_reply_error("load: cannot read image '" + path + "'");
                 continue;
@@ -261,6 +338,62 @@ int main(int argc, char** argv) {
             printf("{\"ok\":true,\"event\":\"loaded\",\"width\":%d,\"height\":%d,\"cached\":false}\n",
                    img_w, img_h);
             fflush(stdout);
+            continue;
+        }
+
+        if(cmd=="track_config") {
+            int length,start; std::string extra;
+            if(!(is>>length>>start) || (is>>extra) || length<0 || start<0 || (length>0 && start>=length)) {
+                sam3_reply_error("track_config: expected full sequence length and valid source seed index"); continue;
+            }
+            if(tracker) { sam3_reply_error("track_config: reset active track before changing sequence bounds"); continue; }
+            sequence_length=length; source_start_frame=start;
+            printf("{\"ok\":true,\"event\":\"track_configured\",\"sequence_length\":%d,\"source_start_frame\":%d}\n",length,start);
+            fflush(stdout); continue;
+        }
+
+        if (cmd == "track_reset") {
+            tracker.reset();
+            state=sam3_create_state(*model,params);
+            have_image=false; loaded_path.clear(); tracked_object_id=-1;
+            sequence_length=0; source_start_frame=0;
+            pending=sam3_pvs_params();
+            printf("{\"ok\":true,\"event\":\"track_reset\"}\n"); fflush(stdout);
+            continue;
+        }
+
+        if (cmd == "track_add") {
+            int requested_id;
+            if(!(is>>requested_id) || requested_id<1) { sam3_reply_error("track_add: expected positive object_id"); continue; }
+            if(!sam3_supports_video_tracking(*model)) { sam3_reply_error("Video tracking is unsupported for this model or selected image-only preprocessing"); continue; }
+            if(!have_image || (pending.pos_points.empty() && !pending.use_box)) { sam3_reply_error("track_add: load an image and queue a prompt first"); continue; }
+            if(tracker) { sam3_reply_error("track_add: independent single-object tracking; reset and reseed another fruit"); continue; }
+            sam3_visual_track_params vp; vp.fill_hole_area=0; vp.recondition_every=0;
+            vp.efficient_sequence_length=sequence_length; vp.efficient_source_start_frame=source_start_frame;
+            tracker=sam3_create_visual_tracker(*model,vp);
+            if(!tracker) { sam3_reply_error("track_add: tracker unavailable"); continue; }
+            auto result=sam3_segment_pvs(*state,*model,pending);
+            const int id=sam3_tracker_add_instance(*tracker,*state,*model,pending);
+            pending=sam3_pvs_params();
+            if(id<0 || result.detections.empty()) { tracker.reset(); sam3_reply_error("track_add: initialization failed"); continue; }
+            auto best=std::max_element(result.detections.begin(),result.detections.end(),
+                [](const sam3_detection& a,const sam3_detection& b){ return a.score<b.score; });
+            sam3_result selected; selected.detections.push_back(*best);
+            tracked_object_id=requested_id;
+            sam3_reply_tracking("track_added",0,tracked_object_id,img_w,img_h,selected);
+            continue;
+        }
+
+        if (cmd == "track_frame") {
+            if(!tracker) { sam3_reply_error("track_frame: initialize a track first"); continue; }
+            std::string path; std::getline(is>>std::ws,path);
+            auto frame=sam3_load_image_for_model(path,*model);
+            if(frame.data.empty()) { sam3_reply_error("track_frame: cannot read image"); continue; }
+            const int frame_index=sam3_tracker_frame_index(*tracker);
+            auto result=sam3_propagate_frame(*tracker,*state,*model,frame);
+            if(result.detections.empty()) { tracker.reset(); have_image=false; sam3_reply_error("track_frame: inference failed; reset and reseed required"); continue; }
+            img_w=frame.width; img_h=frame.height; loaded_path=path; have_image=true;
+            sam3_reply_tracking("tracked",frame_index,tracked_object_id,img_w,img_h,result);
             continue;
         }
 

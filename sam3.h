@@ -38,6 +38,7 @@ enum sam3_model_type {
     SAM3_MODEL_SAM3_VISUAL = 1,  // SAM3 visual-only (ViT + tracker, no text)
     SAM3_MODEL_SAM2        = 2,  // SAM2 (Hiera + tracker, no text/detector)
     SAM3_MODEL_EDGETAM     = 3,  // EdgeTAM (RepViT + Perceiver, no text/detector)
+    SAM3_MODEL_EFFICIENT_SAM2 = 4, // ConvRot GGUF; validated base-plus SWR/SMR video profile.
 };
 
 /*****************************************************************************
@@ -81,6 +82,9 @@ struct sam3_detection {
     int       instance_id = -1;
     sam3_mask  mask;
     std::vector<float> sam_token;  // raw SAM decoder output token (for obj_ptr)
+    std::vector<float> low_res_logits; // Native tracking preserves decoder logits, never binary-mask surrogates.
+    std::vector<float> decoder_saliency;
+    float object_logit = 0.0f;
 };
 
 struct sam3_result {
@@ -99,6 +103,13 @@ struct sam3_params {
     bool        use_gpu         = true;
     int         seed            = 42;
     int         encode_img_size = 0;  // 0 = model default; override input resolution
+    bool        experimental_efficient_video = false; // Deprecated compatibility flag; verified base-plus capability follows explicit video preprocessing.
+    bool        experimental_efficient_q8_0 = false; // Second quantization with dynamic Q8_0 activations; separate quality gate.
+    bool        efficient_video_preprocessing = false; // Explicit PIL RGB bicubic uint8 pipeline; image-only keeps inherited bilinear.
+    bool        efficient_prefix_cache = false; // Exact prefix reuse; independent of INT8 compute.
+    bool        efficient_fpn_cache = false; // Opt-in exact four-entry per-image RAM cache of unconditioned FPN outputs.
+    std::string efficient_cache_directory; // Empty means RAM-only, no filesystem writes.
+    uint64_t    efficient_cache_disk_budget = 0; // Required explicit byte budget for persistent artifacts.
 };
 
 struct sam3_tensor_info {
@@ -193,6 +204,20 @@ bool sam3_is_visual_only(const sam3_model & model);
 /* Returns the model type (SAM2 or SAM3). */
 sam3_model_type sam3_get_model_type(const sam3_model & model);
 
+/* Efficient-SAM2 video requires validated base-plus and explicit video preprocessing.
+** Default compressed GGUF storage restores FP32 weights for CPU inference. */
+bool sam3_supports_video_tracking(const sam3_model & model);
+struct sam3_prefix_cache_statistics {
+    bool enabled=false;
+    uint64_t ram_hits=0,disk_hits=0,misses=0,invalid_entries=0,writes=0,evictions=0,resident_bytes=0,disk_bytes=0;
+};
+sam3_prefix_cache_statistics sam3_get_prefix_cache_statistics(const sam3_model& model);
+struct sam3_fpn_cache_statistics {
+    bool enabled=false;
+    uint64_t hits=0,misses=0,evictions=0,resident_bytes=0;
+};
+sam3_fpn_cache_statistics sam3_get_fpn_cache_statistics(const sam3_model& model);
+
 /*
 ** ── Inference State ──────────────────────────────────────────────────────
 */
@@ -216,6 +241,9 @@ void sam3_free_state(sam3_state & state);
 bool sam3_encode_image(sam3_state       & state,
                        const sam3_model & model,
                        const sam3_image & image);
+// A new independent seed must use all Efficient windows even if this transient
+// image state was most recently used by another track's sparse propagation.
+bool sam3_encode_conditioning_image(sam3_state& state,const sam3_model& model,const sam3_image& image);
 
 /*
 ** ── Image Segmentation ──────────────────────────────────────────────────
@@ -274,6 +302,10 @@ void sam3_tracker_reset(sam3_tracker & tracker);
 */
 
 struct sam3_visual_track_params {
+    // Full initialized source length, independent of a truncated run or seed.
+    // 0 = unknown streaming length (fixed 16-pointer normalization).
+    int   efficient_sequence_length = 0;
+    int   efficient_source_start_frame = 0;
     float assoc_iou_threshold = 0.1f;
     int   max_keep_alive      = 30;
     int   recondition_every   = 16;
@@ -304,6 +336,15 @@ sam3_result sam3_propagate_frame(
 */
 
 sam3_image      sam3_load_image(const std::string & path);
+// Model-aware input adapter: Efficient video JPEGs use the faithful libjpeg RGB
+// pipeline; other formats and legacy/image-only models retain the stb loader.
+sam3_image      sam3_load_image_for_model(const std::string & path, const sam3_model & model);
+std::string     sam3_get_preprocessing(const sam3_model & model);
+std::string     sam3_get_build_identity();
+// Content identity of the executable and loaded libraries; unsupported or
+// unreadable objects return false without preventing ordinary inference.
+bool            sam3_get_runtime_identity(std::string & json, std::string & error);
+std::string     sam3_get_model_runtime_identity(const sam3_model & model);
 bool            sam3_save_mask(const sam3_mask & mask, const std::string & path);
 sam3_image      sam3_decode_video_frame(const std::string & video_path, int frame_index);
 sam3_video_info sam3_get_video_info(const std::string & video_path);

@@ -48,7 +48,7 @@ const check = (name, cond, detail = '') => {
   else { fail++; console.log(`not ok ${pass + fail} - ${name}${detail ? ' # ' + detail : ''}`); }
 };
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({ chromiumSandbox: true, ...(process.env.CHROMIUM_PATH ? {executablePath: process.env.CHROMIUM_PATH} : {}) });
 const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
 
 const consoleErrors = [];
@@ -98,6 +98,7 @@ check('実行 is disabled before a model and a prompt exist',
   await page.locator('#segment').isDisabled());
 
 // --- model ---
+await page.fill('#modelPath', '/explicit/test-model.ggml');
 await page.click('#startModel');
 await page.waitForFunction(() => document.getElementById('status').className.includes('ok'), null, { timeout: 15000 });
 check('model start reaches a ready state', true);
@@ -222,6 +223,16 @@ check('a malformed mask is rejected instead of rendered',
   (await page.textContent('#status')).includes('復号'),
   await page.textContent('#status'));
 
+// Editing an auto-run-off prompt must invalidate the earlier candidate.
+await page.evaluate(() => { window.Bridge.samSegment = window.__ORIG_SEGMENT__; document.getElementById('auto').checked = false; });
+await page.click('#clear');
+await page.mouse.click(boxEl.x + boxEl.width / 2, boxEl.y + boxEl.height / 2);
+await page.click('#segment');
+await page.waitForFunction(() => !document.getElementById('accept').disabled);
+await page.mouse.click(boxEl.x + boxEl.width / 2 + 20, boxEl.y + boxEl.height / 2);
+check('editing prompt B invalidates mask inferred from prompt A', await page.locator('#accept').isDisabled() && (await page.textContent('#candidates')) === '');
+await page.evaluate(() => { document.getElementById('auto').checked = true; });
+
 // A slow reply must not let a second request overlap on the single stream.
 await page.evaluate(() => {
   const det = window.__FIXTURE__;
@@ -234,6 +245,7 @@ await page.evaluate(() => {
 });
 await page.mouse.click(boxEl.x + boxEl.width / 2, boxEl.y + boxEl.height / 2);
 await page.waitForTimeout(60);
+check('mode controls are disabled during an in-flight prompt', await page.locator('[data-mode=box]').isDisabled());
 await page.mouse.click(boxEl.x + boxEl.width / 2 + 10, boxEl.y + boxEl.height / 2);
 await page.keyboard.press('Space');
 await page.waitForTimeout(900);
@@ -318,14 +330,14 @@ await page.waitForTimeout(120);
 check('clicking a row selects it', await page.evaluate(() =>
   !!document.querySelector('#instances li.sel')));
 
-// --- discarding work asks first ---
+// --- reopening the same sequence preserves work ---
 let asked = null;
 page.on('dialog', async (d) => { asked = d.message(); await d.dismiss(); });
 await page.click('#openImage');
 await page.waitForTimeout(300);
-check('opening another image asks before discarding instances',
-  asked !== null && asked.includes('破棄'), String(asked));
-check('dismissing the prompt keeps the current image',
+check('reopening the same frame does not discard or ask to discard',
+  asked === null, String(asked));
+check('reopening preserves the current image',
   (await page.textContent('#imageName')).includes('test_image'));
 
 // --- the panel stays reachable no matter how many instances exist ---

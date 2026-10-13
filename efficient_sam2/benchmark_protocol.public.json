@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "registered_at_utc": "2026-10-13T13:27:32.119751+00:00",
+  "purpose": "practical whole-model FP32-restored versus experimental GGML Q8_0 comparison; distinct from exact-prefix workflow benchmark",
+  "model_sha256": "0c58eac7150d1b24970bc2ff1537a8847faec9e971be585bfd55411ef8a6b32b",
+  "input_files": {
+    "fixture/frames_17/00000.jpg": "e1ba81f9021624a6fb0a1bf28bbef04bc8ba866361e71b06e8b74001cc196b12",
+    "fixture/frames_17/00001.jpg": "d6ab1e85aee14aeb7dc6913a6890bb1cb106489d2362cee310bc2ebec50b7e34",
+    "fixture/frames_17/00002.jpg": "467288821ed64b3fe445e14d80fba72e86284fb0ff2e72c1dc3bcfb7969737bd",
+    "fixture/frames_17/00003.jpg": "12316ce914b51930b9238c90ce374368893abf17e41db6869355e5fa56a9c8eb"
+  },
+  "initialized_sequence_length": 17,
+  "source_start_ordinal": 0,
+  "consumed_frames": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "box_xyxy": [
+    73,
+    245,
+    309,
+    783
+  ],
+  "threads": 4,
+  "device": "CPU",
+  "cache": "disabled in both modes",
+  "variants": {
+    "A": "restored_fp32_cpu",
+    "B": "experimental_ggml_q8_0_cpu"
+  },
+  "pair_orders": [
+    "AB",
+    "BA",
+    "AB"
+  ],
+  "warmup": "one excluded 2-frame process per mode; filesystem expected warm, each measured process reloads model",
+  "measurements": [
+    "full process wall seconds",
+    "explicit model load seconds with validation/backend/quantize/allocation/restore/provenance breakdown",
+    "per-frame wall including decode/preprocess/inference/compact PNG output",
+    "encoder/memory/decoder build-allocate/upload/compute/download phase samples",
+    "wait4 ru_maxrss bytes",
+    "model weight buffer bytes",
+    "all raw samples and paired A/B inference and total-wall ratios"
+  ],
+  "summary": "median of paired A/B ratios plus raw min/max; no best-run selection or unqualified microbenchmark extrapolation",
+  "requirements": [
+    "all native and quantization gates pass before selecting deployment mode",
+    "same frozen complete-fix executable and shared-library snapshot for A and B",
+    "no other heavy jobs during timed measurements",
+    "profile scopes enabled in both variants; full FP32 tensor dumps disabled during measured runs",
+    "timing-only instrumentation must retain identical mask/logit hashes to frozen gate binary in an excluded preflight",
+    "lower resident weight memory alone is not proof of speedup",
+    "keep Q8 disabled by default unless measured deployment trade-off justifies enabling it"
+  ]
+}

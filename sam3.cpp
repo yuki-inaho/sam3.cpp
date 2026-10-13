@@ -1,6 +1,18 @@
+// Efficient-SAM2-specific SWR/SMR, decoder-saliency and storage-boundary
+// additions adapt Apache-2.0 upstream algorithms. See efficient_sam2/NOTICE.md.
 #define _USE_MATH_DEFINES
 
 #include "sam3.h"
+#include "efficient_sam2/gguf_loader.h"
+#include "efficient_sam2/sparse_policy.h"
+#include "efficient_sam2/profile.h"
+#include "efficient_sam2/cpu_quant/weights.h"
+#include "efficient_sam2/resize.h"
+#include "efficient_sam2/jpeg_decode.h"
+#include "efficient_sam2/runtime_identity.h"
+#include "efficient_sam2/prefix_cache/cache.h"
+#include "efficient_sam2/prefix_cache/digest.h"
+#include "efficient_sam2/fpn_cache.h"
 
 /* ggml */
 #include "ggml-alloc.h"
@@ -35,11 +47,15 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <iomanip>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <map>
+#include <set>
+#include <sstream>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -193,7 +209,7 @@ struct sam3_hparams {
     int32_t edgetam_feat_size() const { return img_size / 16; }  // 1024/16 = 64
 
     // ── SAM2 derived helpers ────────────────────────────────────────────
-    bool is_sam2() const { return model_type == SAM3_MODEL_SAM2; }
+    bool is_sam2() const { return model_type == SAM3_MODEL_SAM2 || model_type == SAM3_MODEL_EFFICIENT_SAM2; }
 
     int32_t hiera_total_blocks() const {
         int s = 0;
@@ -843,6 +859,15 @@ struct edgetam_perceiver {
 struct sam3_model {
     sam3_hparams        hparams;
     ggml_type           weight_type = GGML_TYPE_F16;
+    bool experimental_efficient_video = false;
+    bool experimental_efficient_q8_0 = false;
+    bool efficient_video_preprocessing = false;
+    efficient_sam2::RuntimeIdentity runtime_identity;
+    std::string runtime_identity_error;
+    std::set<std::string> efficient_linear_weights;
+    std::shared_ptr<efficient_sam2::prefix_cache::Cache> efficient_cache;
+    efficient_sam2::prefix_cache::Key efficient_cache_key;
+    std::shared_ptr<efficient_sam2::fpn_cache::Cache> efficient_fpn_cache;
 
     // ── SAM3-specific (loaded only when model_type != SAM2) ──────────────
     sam3_vit            vit;
@@ -857,6 +882,9 @@ struct sam3_model {
     // ── SAM2-specific (loaded only when model_type == SAM2) ──────────────
     sam2_hiera          hiera;
     sam2_fpn_neck       fpn_neck;
+    struct ggml_tensor * efficient_norm_w = nullptr, * efficient_norm_b = nullptr;
+    struct ggml_tensor * efficient_down_w = nullptr, * efficient_down_b = nullptr;
+    struct ggml_tensor * efficient_up_w = nullptr, * efficient_up_b = nullptr;
 
     // ── EdgeTAM-specific (loaded only when model_type == EDGETAM) ───────
     edgetam_repvit      repvit;
@@ -898,6 +926,8 @@ struct sam3_model {
 };
 
 struct sam3_state {
+    // Empty means the initial all-window Efficient-SAM2 image pass.
+    std::vector<int> efficient_window_ids;
     // cached backbone outputs
     struct ggml_tensor* vit_output       = nullptr;  // [1, embed, H, W]
     struct ggml_tensor* neck_det[4]      = {};       // FPN levels (det path)
@@ -957,6 +987,8 @@ struct sam3_memory_slot {
 
 struct sam3_tracker {
     sam3_video_params params;
+    int efficient_sequence_length=0;
+    int efficient_source_start_frame=0;
     int frame_index  = 0;
     int next_inst_id = 1;
 
@@ -965,6 +997,8 @@ struct sam3_tracker {
 
     std::map<int, std::vector<sam3_memory_slot>> mem_banks;
     std::map<int, std::vector<std::pair<int, struct ggml_tensor*>>> ptr_banks;
+    efficient_sam2::WindowRouter efficient_windows;
+    std::map<int, efficient_sam2::MemoryQueue> efficient_memory;
 
     struct ggml_context* ctx = nullptr;
     ggml_backend_buffer_t buffer = nullptr;
@@ -1084,8 +1118,11 @@ static void sam3_read_f32(struct ggml_tensor* t, float* dst, int64_t n) {
     }
 }
 
+#include "efficient_sam2/cpu_linear.inl"
+
 static struct ggml_tensor* sam3_conv_transpose_weight(struct ggml_context* ctx,
-                                                      struct ggml_tensor* w) {
+                                                      struct ggml_tensor* w, bool preserve_fp32=false) {
+    if(preserve_fp32 && w->type==GGML_TYPE_F32) return w;
     return w->type == GGML_TYPE_F16 ? w : ggml_cast(ctx, w, GGML_TYPE_F16);
 }
 
@@ -1760,6 +1797,7 @@ static void sam2_register_tensors(sam3_model& model) {
         return t;
     };
     auto T2 = [&](const std::string& name, int64_t d0, int64_t d1) -> ggml_tensor* {
+        if(hp.model_type==SAM3_MODEL_EFFICIENT_SAM2) model.efficient_linear_weights.insert(name);
         const ggml_type type = (d0 % WBLK == 0) ? WTYPE : GGML_TYPE_F32;
         auto* t = ggml_new_tensor_2d(ctx, type, d0, d1);
         ggml_set_name(t, name.c_str());
@@ -1851,7 +1889,8 @@ static void sam2_register_tensors(sam3_model& model) {
     }
 
     // ── SAM prompt encoder (shared) ──────────────────────────────────────
-    model.sam_pe.pe_gaussian = T2f("sam_pe.pe_gaussian", 2, 128);
+    // PyTorch row-major [2,128] payload; ggml dimensions are reversed.
+    model.sam_pe.pe_gaussian = T2f("sam_pe.pe_gaussian", 128, 2);
     for (int i = 0; i < 4; ++i)
         model.sam_pe.point_embed[i] = T2f("sam_pe.point_embeddings." + std::to_string(i) + ".weight", D, 1);
     model.sam_pe.not_a_point_embed = T2f("sam_pe.not_a_point_embed.weight", D, 1);
@@ -2060,6 +2099,17 @@ static void sam2_register_tensors(sam3_model& model) {
     }
     T4f("trk_mask_ds.weight", 4, 4, 1, 1);
     T1f("trk_mask_ds.bias", 1);
+    if (hp.model_type == SAM3_MODEL_EFFICIENT_SAM2) {
+        const int channels = hp.hiera_embed_dim * 4;
+        const int block = hp.hiera_global_idx[hp.hiera_global_n - 1];
+        const auto prefix = "hiera.blocks." + std::to_string(block) + ".bypass_branch.";
+        model.efficient_norm_w = T1f(prefix + "norm.weight", channels);
+        model.efficient_norm_b = T1f(prefix + "norm.bias", channels);
+        model.efficient_down_w = T2(prefix + "down_project.weight", channels, channels/2);
+        model.efficient_down_b = T1f(prefix + "down_project.bias", channels/2);
+        model.efficient_up_w = T2(prefix + "up_project.weight", channels/2, channels);
+        model.efficient_up_b = T1f(prefix + "up_project.bias", channels);
+    }
 }
 
 // Helper: make_divisible(v, divisor) — rounds v up to nearest multiple of divisor
@@ -3201,7 +3251,100 @@ static bool sam3_load_tensors(std::ifstream& fin, sam3_model& model, int n_tenso
 ** Model loading — public API
 *****************************************************************************/
 
+static bool sam2_gguf_hparams(const sam2_gguf_file& file, sam3_hparams& hp) {
+    if (file.test_fixture) {
+        fprintf(stderr, "%s: test-only synthetic weights cannot be used as a trained model\n", __func__);
+        return false;
+    }
+    std::string profile_error;
+    if(!sam2_gguf_validate_native_profile(file,profile_error)) {
+        fprintf(stderr,"%s: %s\n",__func__,profile_error.c_str());
+        return false;
+    }
+    if (file.sam2_version != "2.1" || file.image_size != 1024 ||
+        (file.variant != "base_plus" && file.variant != "large")) {
+        fprintf(stderr, "%s: supported profiles are explicit SAM2.1 base_plus/large, image_size=1024\n", __func__);
+        return false;
+    }
+    hp.model_type = SAM3_MODEL_EFFICIENT_SAM2;
+    hp.img_size = 1024;
+    hp.visual_only = 1;
+    if (file.variant == "base_plus") {
+        hp.hiera_embed_dim = 112;
+        const int stages[4] = {2, 3, 16, 3};
+        const int global[3] = {12, 16, 20};
+        const int windows[4] = {8, 4, 14, 7};
+        std::copy(stages, stages + 4, hp.hiera_stages);
+        std::copy(global, global + 3, hp.hiera_global_idx);
+        std::copy(windows, windows + 4, hp.hiera_window_spec);
+        hp.hiera_pos_embed_bkg_h = hp.hiera_pos_embed_bkg_w = 14;
+    }
+    fprintf(stderr, "Efficient-SAM2 GGUF: %s, restored FP32 CPU compute; packed-window image path.\n"
+                    "Video capability is separately gated by the runtime profile.\n", file.variant.c_str());
+    return true;
+}
+
+#include "efficient_sam2/q8_loading.inl"
+#include "efficient_sam2/cache_hooks.inl"
+
+static bool sam2_gguf_load_tensors(const sam2_gguf_file& file, sam3_model& model,
+                                 const sam2_packed_weights& packed) {
+    std::map<std::string, std::string> sources;
+    int bypass_count = 0;
+    const int bypass_block = file.variant == "base_plus" ? 20 : 43;
+    const std::string bypass_prefix = "image_encoder.trunk.blocks." + std::to_string(bypass_block) + ".bypass_branch.";
+    const std::set<std::string> bypass_fields = {"norm.weight", "norm.bias", "down_project.weight", "down_project.bias", "up_project.weight", "up_project.bias"};
+    for (const auto& kv : file.tensors) {
+        if (sam2_gguf_is_auxiliary(kv.first)) continue;
+        if (kv.first.compare(0, bypass_prefix.size(), bypass_prefix) == 0 &&
+            bypass_fields.count(kv.first.substr(bypass_prefix.size()))) {
+            ++bypass_count;
+        }
+        const auto name = sam2_gguf_runtime_name(kv.first);
+        if (!model.tensors.count(name) || !sources.emplace(name, kv.first).second) {
+            fprintf(stderr, "%s: unknown or duplicate model tensor '%s'\n", __func__, kv.first.c_str());
+            return false;
+        }
+    }
+    if (bypass_count != 6 || sources.size() != model.tensors.size()) {
+        fprintf(stderr, "%s: incomplete Efficient-SAM2 checkpoint: backbone/shared %zu/%zu, bypass %d/6\n",
+                __func__, sources.size(), model.tensors.size(), bypass_count);
+        return false;
+    }
+    for (const auto& kv : model.tensors) {
+        const auto& name = sources.at(kv.first);
+        const auto& info = file.tensors.at(name);
+        const auto* tensor = kv.second;
+        // SAM2's positional/memory tensors sometimes deliberately add trailing
+        // singleton axes. Check all meaningful axes, not element count alone.
+        if (info.shape.size() > 4) return false;
+        for (size_t d = 0; d < 4; ++d) {
+            const int64_t expected = d < info.shape.size() ? info.shape[info.shape.size()-1-d] : 1;
+            if (tensor->ne[d] != expected) {
+                fprintf(stderr, "%s: shape mismatch for '%s' at axis %zu\n", __func__, name.c_str(), d);
+                return false;
+            }
+        }
+        std::vector<float> restored;
+        std::string error;
+        const auto optimized=packed.find(kv.first);
+        if(optimized!=packed.end()) {
+            if(ggml_nbytes(tensor)!=optimized->second.bytes.size()) return false;
+            ggml_backend_tensor_set(kv.second,optimized->second.bytes.data(),0,optimized->second.bytes.size());
+            continue;
+        }
+        if (!sam2_gguf_restore(file, name, restored, error) || ggml_nbytes(tensor) != restored.size()*sizeof(float)) {
+            fprintf(stderr, "%s: failed to restore '%s': %s\n", __func__, name.c_str(), error.c_str());
+            return false;
+        }
+        ggml_backend_tensor_set(kv.second, restored.data(), 0, restored.size()*sizeof(float));
+    }
+    fprintf(stderr, "%s: loaded %zu tensors (%zu candidate packed), including %d learned bypass parameters\n", __func__, sources.size(),packed.size(), bypass_count);
+    return true;
+}
+
 std::shared_ptr<sam3_model> sam3_load_model(const sam3_params& params) {
+    sam2_profile_scope load_profile("model.load");
     fprintf(stderr, "%s: loading model from '%s'\n", __func__, params.model_path.c_str());
 
     std::ifstream fin(params.model_path, std::ios::binary);
@@ -3211,15 +3354,26 @@ std::shared_ptr<sam3_model> sam3_load_model(const sam3_params& params) {
     }
 
     // ── Read + validate header ───────────────────────────────────────────
-    uint32_t magic;
-    int32_t version, ftype, n_tensors;
+    uint32_t magic = 0;
+    int32_t version = 0, ftype = 0, n_tensors = 0;
     fin.read(reinterpret_cast<char*>(&magic), 4);
     fin.read(reinterpret_cast<char*>(&version), 4);
     fin.read(reinterpret_cast<char*>(&ftype), 4);
     fin.read(reinterpret_cast<char*>(&n_tensors), 4);
 
     bool is_sam2 = false;
-    if (magic == SAM3_MAGIC) {
+    const bool is_efficient_gguf = magic == 0x46554747;
+    sam2_gguf_file efficient_file;
+    if (is_efficient_gguf) {
+        std::string error;
+        if (!sam2_gguf_open(params.model_path, efficient_file, error)) {
+            fprintf(stderr, "%s: %s\n", __func__, error.c_str());
+            return nullptr;
+        }
+        is_sam2 = true;
+        ftype = 0;
+        n_tensors = (int)efficient_file.tensors.size();
+    } else if (magic == SAM3_MAGIC) {
         if (version != SAM3_FILE_VERSION) {
             fprintf(stderr, "%s: unsupported SAM3 version: %d (expected %d)\n",
                     __func__, version, SAM3_FILE_VERSION);
@@ -3240,7 +3394,20 @@ std::shared_ptr<sam3_model> sam3_load_model(const sam3_params& params) {
     fprintf(stderr, "%s: %s format v%d, ftype %d, %d tensors\n",
             __func__, is_sam2 ? "SAM2" : "SAM3", version, ftype, n_tensors);
 
-    auto model = std::make_shared<sam3_model>();
+    load_profile.lap("open_validate");
+    std::shared_ptr<sam3_model> model(new sam3_model(), [](sam3_model* value) {
+        sam3_free_model(*value);
+        delete value;
+    });
+    model->experimental_efficient_video = params.experimental_efficient_video;
+    model->experimental_efficient_q8_0 = params.experimental_efficient_q8_0;
+    model->efficient_video_preprocessing = params.efficient_video_preprocessing;
+    if(params.experimental_efficient_q8_0 && !is_efficient_gguf) {
+        fprintf(stderr,"Q8 candidate is supported only for an explicit Efficient-SAM2 GGUF profile\n"); return nullptr;
+    }
+    if(params.efficient_fpn_cache && (!is_efficient_gguf || efficient_file.variant!="base_plus")) {
+        fprintf(stderr,"Full FPN cache requires an explicit Efficient-SAM2 base-plus GGUF profile\n"); return nullptr;
+    }
     {
         ggml_type wtype;
         switch (ftype) {
@@ -3257,7 +3424,10 @@ std::shared_ptr<sam3_model> sam3_load_model(const sam3_params& params) {
     }
 
     // ── Read hyperparameters ─────────────────────────────────────────────
-    if (is_sam2) {
+    if (is_efficient_gguf) {
+        if (!sam2_gguf_hparams(efficient_file, model->hparams)) return nullptr;
+        sam2_print_hparams(model->hparams);
+    } else if (is_sam2) {
         if (!sam2_load_hparams(fin, model->hparams)) {
             fprintf(stderr, "%s: failed to read SAM2 hyperparameters\n", __func__);
             return nullptr;
@@ -3277,7 +3447,7 @@ std::shared_ptr<sam3_model> sam3_load_model(const sam3_params& params) {
 
     // ── Init backend ─────────────────────────────────────────────────────
 #ifdef GGML_USE_METAL
-    if (params.use_gpu) {
+    if (params.use_gpu && !is_efficient_gguf) {
         fprintf(stderr, "%s: using Metal backend\n", __func__);
         model->backend = ggml_backend_metal_init();
     }
@@ -3316,6 +3486,11 @@ std::shared_ptr<sam3_model> sam3_load_model(const sam3_params& params) {
     }
     fprintf(stderr, "%s: registered %zu tensors\n", __func__, model->tensors.size());
 
+    load_profile.lap("backend_register");
+    sam2_packed_weights packed_weights;
+    if(model->experimental_efficient_q8_0 && !sam2_prepare_q8_weights(efficient_file,*model,packed_weights)) return nullptr;
+
+    load_profile.lap("q8_restore_pack");
     // ── Allocate backend buffer for all tensors ──────────────────────────
     model->buffer = ggml_backend_alloc_ctx_tensors(model->ctx, model->backend);
     if (!model->buffer) {
@@ -3325,12 +3500,20 @@ std::shared_ptr<sam3_model> sam3_load_model(const sam3_params& params) {
     fprintf(stderr, "%s: buffer size = %.2f MB\n", __func__,
             ggml_backend_buffer_get_size(model->buffer) / (1024.0 * 1024.0));
 
+    load_profile.lap("allocate_weights");
     // ── Load tensor data from file ───────────────────────────────────────
-    if (!sam3_load_tensors(fin, *model, n_tensors)) {
+    if (!(is_efficient_gguf ? sam2_gguf_load_tensors(efficient_file, *model,packed_weights)
+                           : sam3_load_tensors(fin, *model, n_tensors))) {
         fprintf(stderr, "%s: failed to load tensors\n", __func__);
         return nullptr;
     }
 
+    load_profile.lap("restore_upload_weights");
+    if (!efficient_sam2::runtime_identity(model->runtime_identity,model->runtime_identity_error))
+        fprintf(stderr,"Runtime library identity unavailable: %s\n",model->runtime_identity_error.c_str());
+    if(is_efficient_gguf) sam2_prepare_prefix_cache(efficient_file,*model,params);
+
+    load_profile.lap("runtime_identity_cache");
     // ── Load embedded BPE tokenizer (SAM3 only) ───────────────────────
     if (!is_sam2 && !model->hparams.visual_only) {
         if (!sam3_load_bpe_vocab_from_stream(fin, model->tokenizer)) {
@@ -3368,6 +3551,32 @@ bool sam3_is_visual_only(const sam3_model& model) {
 
 sam3_model_type sam3_get_model_type(const sam3_model& model) {
     return model.hparams.model_type;
+}
+
+bool sam3_supports_video_tracking(const sam3_model& model) {
+    if(model.hparams.model_type != SAM3_MODEL_EFFICIENT_SAM2) return true;
+    // The validated sparse policy is base-plus, forward, stride one. Large has
+    // a different window geometry and must not inherit this capability.
+    return model.efficient_video_preprocessing && model.hparams.hiera_embed_dim==112;
+}
+
+sam3_prefix_cache_statistics sam3_get_prefix_cache_statistics(const sam3_model& model) {
+    sam3_prefix_cache_statistics out;
+    if(!model.efficient_cache) return out;
+    const auto values=efficient_sam2::prefix_cache::stats(*model.efficient_cache);
+    out.enabled=true; out.ram_hits=values.ram_hits; out.disk_hits=values.disk_hits;
+    out.misses=values.misses; out.invalid_entries=values.invalid_entries;
+    out.writes=values.writes; out.evictions=values.evictions;
+    out.resident_bytes=values.resident_bytes; out.disk_bytes=values.disk_bytes;
+    return out;
+}
+
+sam3_fpn_cache_statistics sam3_get_fpn_cache_statistics(const sam3_model& model) {
+    sam3_fpn_cache_statistics out;
+    if(!model.efficient_fpn_cache) return out;
+    const auto s=model.efficient_fpn_cache->stats();
+    out.enabled=true;out.hits=s.hits;out.misses=s.misses;out.evictions=s.evictions;out.resident_bytes=s.resident_bytes;
+    return out;
 }
 
 /*****************************************************************************
@@ -3519,7 +3728,8 @@ static std::vector<float> sam3_preprocess_image(const sam3_image& image, int img
 
 // SAM2 preprocessing: resize + ImageNet normalization.
 // Returns [C, H, W] float, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225].
-static std::vector<float> sam2_preprocess_image(const sam3_image& image, int img_size) {
+static std::vector<float> sam2_preprocess_image(const sam3_image& image, int img_size,
+                                              bool video_bicubic=false) {
     static const float mean[3] = {0.485f, 0.456f, 0.406f};
     static const float std_d[3] = {0.229f, 0.224f, 0.225f};
     const int C = 3;
@@ -3530,8 +3740,11 @@ static std::vector<float> sam2_preprocess_image(const sam3_image& image, int img
     int w = image.width, h = image.height;
 
     if (w != img_size || h != img_size) {
-        resized.resize(img_size * img_size * 3);
-        sam3_resize_bilinear(pixels, w, h, resized.data(), img_size, img_size);
+        if(video_bicubic) resized=efficient_sam2::resize_video_rgb(pixels,w,h,img_size,img_size);
+        else {
+            resized.resize(img_size * img_size * 3);
+            sam3_resize_bilinear(pixels, w, h, resized.data(), img_size, img_size);
+        }
         pixels = resized.data();
     }
 
@@ -4300,10 +4513,10 @@ static struct ggml_tensor* sam2_hiera_block_forward(struct ggml_context* ctx,
                                                      struct ggml_tensor* x,
                                                      const sam2_hiera_block& blk,
                                                      int spatial_H, int spatial_W,
-                                                     int block_idx = -1) {
+                                                     int block_idx = -1, bool exact_gelu=false) {
     const int64_t C_in = blk.dim_in;
     const int64_t C_out = blk.dim_out;
-    const int B = 1;
+    const int B = (int)x->ne[3];
     const bool dump = (block_idx == 0);  // dump internals for block 0
 
     // ── 1. Pre-norm ──────────────────────────────────────────────────────
@@ -4450,7 +4663,7 @@ static struct ggml_tensor* sam2_hiera_block_forward(struct ggml_context* ctx,
     auto* flat_mlp = ggml_reshape_2d(ctx, normed2, C_out, new_W * new_H * B);
     auto* mlp1 = ggml_mul_mat(ctx, blk.mlp_fc1_w, flat_mlp);
     mlp1 = ggml_add(ctx, mlp1, blk.mlp_fc1_b);
-    mlp1 = ggml_gelu(ctx, mlp1);
+    mlp1 = exact_gelu?ggml_gelu_erf(ctx,mlp1):ggml_gelu(ctx,mlp1);
     auto* mlp2 = ggml_mul_mat(ctx, blk.mlp_fc2_w, mlp1);
     mlp2 = ggml_add(ctx, mlp2, blk.mlp_fc2_b);
     auto* mlp_out = ggml_reshape_4d(ctx, mlp2, C_out, new_W, new_H, B);
@@ -4463,6 +4676,8 @@ static struct ggml_tensor* sam2_hiera_block_forward(struct ggml_context* ctx,
 // Build full Hiera backbone graph.
 // Input: [img_size, img_size, 3, 1] preprocessed image
 // Output: 4 stage outputs in stage_outs[] as [stage_dim, W, H, 1]
+#include "efficient_sam2/hiera.inl"
+
 static void sam2_build_hiera_graph(struct ggml_context* ctx,
                                     struct ggml_tensor* input,
                                     const sam3_model& model,
@@ -5858,11 +6073,14 @@ static bool edgetam_perceiver_forward(
 }
 
 // Full SAM2 image encoding: preprocess → Hiera → FPN → state
+#include "efficient_sam2/fpn_cache_hooks.inl"
+
 static bool sam2_encode_image_hiera(sam3_state& state,
                                      const sam3_model& model,
                                      const sam3_image& image) {
     auto t_start = std::chrono::high_resolution_clock::now();
     const auto& hp = model.hparams;
+    sam2_profile_scope profile("encoder",hp.model_type==SAM3_MODEL_EFFICIENT_SAM2);
     const int img_size = sam3_eff_img_size(state, hp);
 
     fprintf(stderr, "%s: encoding %dx%d image (SAM2 Hiera)\n", __func__,
@@ -5871,8 +6089,44 @@ static bool sam2_encode_image_hiera(sam3_state& state,
     state.orig_width = image.width;
     state.orig_height = image.height;
 
+    const bool efficient = hp.model_type == SAM3_MODEL_EFFICIENT_SAM2;
+    if(efficient && img_size!=1024) {
+        fprintf(stderr,"Efficient-SAM2 requires its trained 1024-square geometry\n");return false;
+    }
+    sam2_efficient_array efficient_stages[4];
+    auto cache_key=model.efficient_cache_key;
+    bool use_cache=bool(model.efficient_cache);
+    std::string fpn_identity;
+    if(use_cache || model.efficient_fpn_cache || (efficient && std::getenv("EFFICIENT_SAM2_FPN_TRACE"))) try {
+        cache_key.input_sha256=efficient_sam2::prefix_cache::sha256_rgb(image.data.data(),image.data.size(),image.width,image.height);
+        cache_key.input_width=image.width; cache_key.input_height=image.height;
+        cache_key.threads=state.n_threads;
+        if(model.efficient_fpn_cache) {
+            fpn_identity=efficient_sam2::prefix_cache::canonical_key(cache_key);
+            auto cached=model.efficient_fpn_cache->lookup(fpn_identity,state.efficient_window_ids);
+            if(cached && sam2_restore_fpn(state,model,*cached)) {
+                sam2_trace_fpn(state,cache_key.input_sha256,true);
+                profile.lap("full_fpn_cache_restore");
+                return true;
+            }
+        }
+    } catch(const std::exception& error) {
+        fprintf(stderr,"Efficient-SAM2 cache key/lookup rejected; recomputing: %s\n",error.what());use_cache=false;fpn_identity.clear();
+    }
+
     // ── Preprocess ───────────────────────────────────────────────────────
-    auto img_data = sam2_preprocess_image(image, img_size);
+    auto img_data = sam2_preprocess_image(image, img_size,
+        hp.model_type==SAM3_MODEL_EFFICIENT_SAM2 && model.efficient_video_preprocessing);
+    if(hp.model_type==SAM3_MODEL_EFFICIENT_SAM2) if(const char* path=std::getenv("EFFICIENT_SAM2_PREPROCESS_DUMP")) {
+        std::ofstream dump(path,std::ios::binary);
+        dump.write(reinterpret_cast<const char*>(img_data.data()),img_data.size()*sizeof(float));
+        std::ofstream rgb(std::string(path)+".rgb",std::ios::binary);
+        rgb.write(reinterpret_cast<const char*>(image.data.data()),image.data.size());
+    }
+    profile.lap("preprocess");
+
+    if (efficient && !sam2_efficient_backbone(model, state, img_data, img_size, efficient_stages,use_cache?&cache_key:nullptr)) return false;
+    profile.lap("backbone");
 
     // ── Build graph ──────────────────────────────────────────────────────
     const size_t buf_size = ggml_tensor_overhead() * 16384 + ggml_graph_overhead() * 2;
@@ -5889,7 +6143,13 @@ static bool sam2_encode_image_hiera(sam3_state& state,
 
     // Build Hiera backbone
     struct ggml_tensor* stage_outs[4] = {};
-    sam2_build_hiera_graph(ctx0, inp, model, stage_outs);
+    if (efficient) {
+        for (int i=0;i<4;++i) {
+            const auto& array=efficient_stages[i];
+            stage_outs[i]=ggml_new_tensor_4d(ctx0,GGML_TYPE_F32,array.ne[0],array.ne[1],array.ne[2],array.ne[3]);
+            ggml_set_input(stage_outs[i]);
+        }
+    } else sam2_build_hiera_graph(ctx0, inp, model, stage_outs);
 
     // Build FPN neck
     struct ggml_tensor* fpn_outs[4] = {};
@@ -5926,10 +6186,13 @@ static bool sam2_encode_image_hiera(sam3_state& state,
     }
 
     // Set input image
-    ggml_backend_tensor_set(inp, img_data.data(), 0, img_data.size() * sizeof(float));
+    if (efficient) {
+        for(int i=0;i<4;++i) ggml_backend_tensor_set(stage_outs[i],efficient_stages[i].data.data(),0,
+            efficient_stages[i].data.size()*sizeof(float));
+    } else ggml_backend_tensor_set(inp, img_data.data(), 0, img_data.size() * sizeof(float));
 
     // Set positional embedding (precomputed on CPU)
-    {
+    if (!efficient) {
         int pe_H = img_size / 4;
         int pe_W = img_size / 4;
         auto pe_data = sam2_compute_pos_embed(model, pe_H, pe_W);
@@ -5937,6 +6200,7 @@ static bool sam2_encode_image_hiera(sam3_state& state,
         ggml_backend_tensor_set(pe_tensor, pe_data.data(), 0, pe_data.size() * sizeof(float));
     }
 
+    profile.lap("fpn_build_allocate_upload");
     // Compute
     if (ggml_backend_is_cpu(model.backend)) {
         ggml_backend_cpu_set_n_threads(model.backend, state.n_threads);
@@ -5948,6 +6212,7 @@ static bool sam2_encode_image_hiera(sam3_state& state,
         return false;
     }
 
+    profile.lap("fpn_compute");
     // ── Copy results to state ────────────────────────────────────────────
     // Free old state buffers
     if (state.buffer) { ggml_backend_buffer_free(state.buffer); state.buffer = nullptr; }
@@ -6009,6 +6274,16 @@ static bool sam2_encode_image_hiera(sam3_state& state,
     ggml_gallocr_free(galloc);
     ggml_free(ctx0);
 
+    if(model.efficient_fpn_cache && !fpn_identity.empty()) try {
+        auto entry=sam2_capture_fpn(state);std::string error;
+        if(!model.efficient_fpn_cache->store(fpn_identity,state.efficient_window_ids,std::move(entry),error))
+            fprintf(stderr,"Efficient-SAM2 FPN cache store failed; inference continues: %s\n",error.c_str());
+    } catch(const std::exception& error) {
+        fprintf(stderr,"Efficient-SAM2 FPN cache store failed; inference continues: %s\n",error.what());
+    }
+    if(efficient) sam2_trace_fpn(state,cache_key.input_sha256,false);
+
+    profile.lap("fpn_copy_position_cleanup");
     auto t_end = std::chrono::high_resolution_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
     fprintf(stderr, "%s: SAM2 image encoded in %lld ms\n", __func__, ms);
@@ -6024,6 +6299,11 @@ static bool sam2_encode_image_hiera(sam3_state& state,
 /*****************************************************************************
 ** Image backbone — public API
 *****************************************************************************/
+
+bool sam3_encode_conditioning_image(sam3_state& state,const sam3_model& model,const sam3_image& image) {
+    state.efficient_window_ids.clear();
+    return sam3_encode_image(state,model,image);
+}
 
 bool sam3_encode_image(sam3_state& state,
                        const sam3_model& model,
@@ -7004,6 +7284,11 @@ bool sam3_encode_image_from_preprocessed(sam3_state& state,
                                          int img_size) {
     auto t_start = std::chrono::high_resolution_clock::now();
     const auto& hp = model.hparams;
+
+    if(hp.model_type==SAM3_MODEL_EFFICIENT_SAM2) {
+        fprintf(stderr,"%s: test-only dense preprocessed API does not support Efficient-SAM2; use its RGB packed-window encoder\n",__func__);
+        return false;
+    }
 
     if (img_size != hp.img_size) {
         fprintf(stderr, "%s: img_size mismatch: got %d, expected %d\n",
@@ -9074,7 +9359,7 @@ static struct ggml_tensor* sam3_cxblock_forward(
     struct ggml_tensor* fc1_b,   // [1024]
     struct ggml_tensor* fc2_w,   // [1024, D]
     struct ggml_tensor* fc2_b,   // [D]
-    struct ggml_tensor* gamma)   // [D]
+    struct ggml_tensor* gamma, bool exact_gelu=false)   // [D]
 {
     const int D = (int)x->ne[0];
     const int H = (int)x->ne[1];
@@ -9096,7 +9381,7 @@ static struct ggml_tensor* sam3_cxblock_forward(
     // Pointwise MLP: reshape to [D, H*W, B], apply FC, reshape back
     auto* flat = ggml_reshape_3d(ctx, h, D, H * W, 1);
     flat = ggml_add(ctx, ggml_mul_mat(ctx, fc1_w, flat), fc1_b);
-    flat = ggml_gelu(ctx, flat);
+    flat = exact_gelu?ggml_gelu_erf(ctx,flat):ggml_gelu(ctx,flat);
     flat = ggml_add(ctx, ggml_mul_mat(ctx, fc2_w, flat), fc2_b);
     h = ggml_reshape_4d(ctx, flat, D, H, W, 1);
 
@@ -9131,7 +9416,7 @@ static sam3_prompt_data sam3_build_prompt_and_pos(
     const std::vector<int>& spatial_tpos,
     const std::vector<std::vector<float>>& obj_ptrs,
     const std::vector<int>& ptr_tpos,
-    int eff_feat_size = 0) {
+    int eff_feat_size = 0, int pointer_denominator = 15) {
     const auto& hp = model.hparams;
     const int MD = hp.mem_out_dim;  // 64
     const int D = hp.neck_dim;      // 256
@@ -9173,7 +9458,7 @@ static sam3_prompt_data sam3_build_prompt_and_pos(
 
     // Read obj_ptr_tpos_proj weights for CPU-side matmul
     std::vector<float> tpos_w(D * MD), tpos_b(MD);
-    if (model.obj_ptr_tpos_w) {
+    if (model.obj_ptr_tpos_w && !(model.experimental_efficient_q8_0 && model.obj_ptr_tpos_w->type==GGML_TYPE_Q8_0)) {
         sam3_read_f32(model.obj_ptr_tpos_w, tpos_w.data(), D * MD);
         sam3_read_f32(model.obj_ptr_tpos_b, tpos_b.data(), MD);
     }
@@ -9184,12 +9469,14 @@ static sam3_prompt_data sam3_build_prompt_and_pos(
 
         // 1D sine PE for temporal position (normalized by max_obj_ptrs - 1 = 15)
         std::vector<float> sine_pe(D);
-        sam3_get_1d_sine_pe(sine_pe.data(), (float)rel / 15.0f, D);
+        sam3_get_1d_sine_pe(sine_pe.data(), (float)rel / float(pointer_denominator), D);
 
         // Project 256-dim sine PE → 64-dim via obj_ptr_tpos_proj (CPU matmul)
         // W is [D=256, MD=64] in ggml; y[j] = sum_i W[i + j*D] * x[i] + b[j]
         std::vector<float> proj_pe(MD, 0.0f);
-        for (int j = 0; j < MD; ++j) {
+        if(model.experimental_efficient_q8_0 && model.obj_ptr_tpos_w->type==GGML_TYPE_Q8_0) {
+            sam2_q8_linear_vector(model,model.obj_ptr_tpos_w,model.obj_ptr_tpos_b,sine_pe.data(),proj_pe.data());
+        } else for (int j = 0; j < MD; ++j) {
             float sum = tpos_b[j];
             for (int i = 0; i < D; ++i)
                 sum += tpos_w[i + j * D] * sine_pe[i];
@@ -9234,7 +9521,9 @@ static struct ggml_tensor* sam3_build_mem_attn_graph(
     struct ggml_tensor* prompt_pos,    // [MD, M_total, 1]
     struct ggml_tensor* rope_freqs,    // [2, D/2, N]
     struct ggml_tensor* rope_k_freqs,  // [2, D/2, M_spatial] or nullptr
-    int num_obj_ptr_tokens) {
+    int num_obj_ptr_tokens,
+    int layer_begin = 0, int layer_end = -1,
+    struct ggml_tensor** latest_importance = nullptr) {
     const auto& ma = model.mem_attn;
     const int D = model.hparams.neck_dim;  // 256
     const int N = (int)curr_tokens->ne[1];
@@ -9242,10 +9531,11 @@ static struct ggml_tensor* sam3_build_mem_attn_graph(
     const int M_spatial = M_total - num_obj_ptr_tokens;
 
     // pos_enc_at_input: x = curr + 0.1 * src_pos
-    auto* x = ggml_add(ctx, curr_tokens, ggml_scale(ctx, src_pos, 0.1f));
+    auto* x = layer_begin == 0 ? ggml_add(ctx, curr_tokens, ggml_scale(ctx, src_pos, 0.1f)) : curr_tokens;
     ggml_set_name(x, "phase7_mem_attn_input");
 
-    for (int l = 0; l < (int)ma.layers.size(); ++l) {
+    const int end = layer_end < 0 ? (int)ma.layers.size() : layer_end;
+    for (int l = layer_begin; l < end; ++l) {
         const auto& ly = ma.layers[l];
 
         // ── Self-attention with RoPE ──────────────────────────────────────
@@ -9305,6 +9595,18 @@ static struct ggml_tensor* sam3_build_mem_attn_graph(
             }
 
             // Flash attention (single head)
+            if (latest_importance) {
+                // SMR uses a separate softmax over ONLY the latest dense spatial
+                // slot, never the full cross-attention distribution or pointer keys.
+                GGML_ASSERT(M_spatial >= N);
+                auto* latest_k = ggml_cont(ctx, ggml_view_3d(ctx,k,D,N,1,k->nb[1],k->nb[2],
+                    (size_t)(M_spatial-N)*k->nb[1]));
+                auto* logits = ggml_scale(ctx,ggml_mul_mat(ctx,latest_k,q),1.0f/sqrtf((float)D));
+                auto* probabilities = ggml_soft_max(ctx,logits);
+                auto* transposed = ggml_cont(ctx,ggml_transpose(ctx,ggml_reshape_2d(ctx,probabilities,N,N)));
+                *latest_importance = ggml_reshape_1d(ctx,ggml_mean(ctx,transposed),N);
+                ggml_set_output(*latest_importance);
+            }
             q = ggml_reshape_4d(ctx, q, D, 1, N, 1);
             k = ggml_reshape_4d(ctx, k, D, 1, M_total, 1);
             v = ggml_reshape_4d(ctx, v, D, 1, M_total, 1);
@@ -9332,9 +9634,11 @@ static struct ggml_tensor* sam3_build_mem_attn_graph(
     }
 
     // Final norm
-    auto* norm_w = model.tensors.at("mem_attn.norm.weight");
-    auto* norm_b = model.tensors.at("mem_attn.norm.bias");
-    x = sam3_layer_norm(ctx, x, norm_w, norm_b);
+    if (end == (int)ma.layers.size()) {
+        auto* norm_w = model.tensors.at("mem_attn.norm.weight");
+        auto* norm_b = model.tensors.at("mem_attn.norm.bias");
+        x = sam3_layer_norm(ctx, x, norm_w, norm_b);
+    }
     ggml_set_name(x, "phase7_mem_attn_output");
 
     return x;  // [D, N, 1]
@@ -9343,6 +9647,8 @@ static struct ggml_tensor* sam3_build_mem_attn_graph(
 /*****************************************************************************
 ** Object pointer extraction (Phase 7, Step 7.3)
 *****************************************************************************/
+
+#include "efficient_sam2/memory.inl"
 
 // Extract object pointer from SAM output token via 3-layer MLP (CPU-side).
 static void sam3_extract_obj_ptr_cpu(
@@ -9367,6 +9673,12 @@ static void sam3_extract_obj_ptr_cpu(
         for (int j = 0; j < 3; ++j) {
             auto* w = model.obj_ptr_proj_w[j];
             auto* b = model.obj_ptr_proj_b[j];
+            if(model.experimental_efficient_q8_0 && w->type==GGML_TYPE_Q8_0) {
+                sam2_q8_linear_vector(model,w,b,h.data(),tmp.data());
+                if(j<2) for(auto& value:tmp) value=std::max(0.0f,value);
+                std::swap(h,tmp);
+                continue;
+            }
             int nel_w = (int)(w->ne[0] * w->ne[1]);
             std::vector<float> w_data(nel_w), b_data(D);
             sam3_read_f32(w, w_data.data(), nel_w);
@@ -9399,6 +9711,12 @@ static void sam3_extract_obj_ptr_cpu(
     for (int j = 0; j < 3; ++j) {
         auto* w = model.obj_ptr_proj_w[j];
         auto* b = model.obj_ptr_proj_b[j];
+        if(model.experimental_efficient_q8_0 && w->type==GGML_TYPE_Q8_0) {
+            sam2_q8_linear_vector(model,w,b,h.data(),tmp.data());
+            if(j<2) for(auto& value:tmp) value=std::max(0.0f,value);
+            std::swap(h,tmp);
+            continue;
+        }
 
         int nel_w = (int)(w->ne[0] * w->ne[1]);
         std::vector<float> w_data(nel_w);
@@ -10171,7 +10489,7 @@ static struct ggml_tensor* sam3_sam_attention(
     struct ggml_tensor* k_in,  // [D, N_kv, B]
     struct ggml_tensor* v_in,  // [D, N_kv, B]
     const sam3_sam_attn& attn,
-    int n_heads) {
+    int n_heads, struct ggml_tensor** probability_output = nullptr) {
     const int64_t N_q = q_in->ne[1];
     const int64_t B = q_in->ne[2];
     const int64_t N_kv = k_in->ne[1];
@@ -10207,6 +10525,13 @@ static struct ggml_tensor* sam3_sam_attention(
 
     // Attention
     float scale = 1.0f / sqrtf((float)HD);
+    if (probability_output) {
+        auto* probabilities=ggml_soft_max(ctx,ggml_scale(ctx,ggml_mul_mat(ctx,K,Q),scale));
+        const int64_t queries=std::min<int64_t>(7,N_q);
+        *probability_output=ggml_cont(ctx,ggml_view_3d(ctx,probabilities,N_kv,queries,n_heads,
+            probabilities->nb[1],probabilities->nb[2],0));
+        ggml_set_output(*probability_output);
+    }
     auto* out = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, scale, 0.0f, 0.0f);
     // out: [HD, NH, N_q, B] (flash_attn_ext swaps dims 1,2 vs input)
 
@@ -10447,7 +10772,7 @@ static void sam3_twoway_block_forward(
     struct ggml_tensor* key_pe,    // [D, N_kv, B]
     const sam3_twoway_block& blk,
     int n_heads,
-    bool skip_first_layer_pe) {
+    bool skip_first_layer_pe, struct ggml_tensor** probability_output = nullptr) {
     // 1. Self-attention on queries
     if (skip_first_layer_pe) {
         // Python: queries = self.self_attn(q=queries, k=queries, v=queries)
@@ -10468,7 +10793,7 @@ static void sam3_twoway_block_forward(
     {
         auto* q = ggml_add(ctx, queries, query_pe);
         auto* k = ggml_add(ctx, keys, key_pe);
-        auto* attn_out = sam3_sam_attention(ctx, q, k, keys, blk.ca_tok2img, n_heads);
+        auto* attn_out = sam3_sam_attention(ctx, q, k, keys, blk.ca_tok2img, n_heads, probability_output);
         queries = ggml_add(ctx, queries, attn_out);
         queries = sam3_layer_norm(ctx, queries, blk.norm2_w, blk.norm2_b);
     }
@@ -10543,6 +10868,7 @@ struct sam3_dec_result {
     struct ggml_tensor* obj_score;    // [1, 1]
     struct ggml_tensor* sam_token;    // [D, 1] — for object pointer
     struct ggml_tensor* mask_tokens;  // [D, N_masks, 1] — raw SAM mask tokens
+    struct ggml_tensor* saliency[3] = {};
 };
 
 static sam3_dec_result sam3_build_sam_dec_graph(
@@ -10592,11 +10918,13 @@ static sam3_dec_result sam3_build_sam_dec_graph(
     auto* keys = src;
     auto* query_pe = tokens;  // query PE = initial point embedding
     auto* key_pe = pos_src;
+    struct ggml_tensor* saliency[3] = {};
+    const bool efficient = hp.model_type == SAM3_MODEL_EFFICIENT_SAM2;
 
     for (int i = 0; i < hp.sam_dec_depth; ++i) {
         sam3_twoway_block_forward(ctx, queries, keys, query_pe, key_pe,
                                   dec.twoway_blocks[i], n_heads,
-                                  /*skip_first_layer_pe=*/(i == 0));
+                                  /*skip_first_layer_pe=*/(i == 0), efficient ? &saliency[i] : nullptr);
         sam3_name_tensorf(queries, "sam_dec_block%d_queries", i);
         ggml_set_output(queries);
         sam3_name_tensorf(keys, "sam_dec_block%d_keys", i);
@@ -10607,7 +10935,7 @@ static sam3_dec_result sam3_build_sam_dec_graph(
     {
         auto* q = ggml_add(ctx, queries, query_pe);
         auto* k = ggml_add(ctx, keys, key_pe);
-        auto* attn_out = sam3_sam_attention(ctx, q, k, keys, dec.final_attn, n_heads);
+        auto* attn_out = sam3_sam_attention(ctx, q, k, keys, dec.final_attn, n_heads, efficient ? &saliency[2] : nullptr);
         queries = ggml_add(ctx, queries, attn_out);
         queries = sam3_layer_norm(ctx, queries, dec.final_norm_w, dec.final_norm_b);
         ggml_set_name(queries, "sam_dec_final_queries");
@@ -10651,7 +10979,7 @@ static sam3_dec_result sam3_build_sam_dec_graph(
     auto* src_img = ggml_reshape_4d(ctx, keys, D, H, H, 1);
     src_img = ggml_cont(ctx, ggml_permute(ctx, src_img, 2, 0, 1, 3));
 
-    auto* up1 = ggml_conv_transpose_2d_p0(ctx, sam3_conv_transpose_weight(ctx, dec.up1_w), src_img, 2);
+    auto* up1 = ggml_conv_transpose_2d_p0(ctx, sam3_conv_transpose_weight(ctx, dec.up1_w, hp.model_type==SAM3_MODEL_EFFICIENT_SAM2), src_img, 2);
     up1 = ggml_add(ctx, up1, ggml_reshape_4d(ctx, dec.up1_b, 1, 1, ggml_nelements(dec.up1_b), 1));
 
     auto* fs1 = ggml_cont(ctx, ggml_permute(ctx, feat_s1, 2, 0, 1, 3));
@@ -10670,7 +10998,7 @@ static sam3_dec_result sam3_build_sam_dec_graph(
     up1 = ggml_cont(ctx, ggml_permute(ctx, up1, 2, 0, 1, 3));  // [144, 144, 64, 1]
 
     // dc2: ConvTranspose2d(64, 32, k=2, s=2) → [288, 288, 32, 1]
-    auto* up2 = ggml_conv_transpose_2d_p0(ctx, sam3_conv_transpose_weight(ctx, dec.up2_w), up1, 2);
+    auto* up2 = ggml_conv_transpose_2d_p0(ctx, sam3_conv_transpose_weight(ctx, dec.up2_w, hp.model_type==SAM3_MODEL_EFFICIENT_SAM2), up1, 2);
     up2 = ggml_add(ctx, up2, ggml_reshape_4d(ctx, dec.up2_b, 1, 1, ggml_nelements(dec.up2_b), 1));
 
     // conv_s0: 1x1 conv on feat_s0 (256→32). feat_s0 is [C, W, H, B] — permute for conv.
@@ -10755,7 +11083,25 @@ static sam3_dec_result sam3_build_sam_dec_graph(
     res.obj_score = obj_score;
     res.sam_token = sam_token;
     res.mask_tokens = mask_tokens_out;
+    for(int i=0;i<3;++i) res.saliency[i]=saliency[i];
     return res;
+}
+
+static std::vector<float> sam2_efficient_read_saliency(const sam3_dec_result& dec) {
+    std::vector<float> result;
+    for(auto* tensor:dec.saliency) {
+        if(!tensor) continue;
+        const size_t pixels=tensor->ne[0], count=ggml_nelements(tensor)/pixels;
+        if(result.empty()) result.assign(pixels,0.0f);
+        std::vector<float> data(ggml_nelements(tensor));
+        ggml_backend_tensor_get(tensor,data.data(),0,data.size()*sizeof(float));
+        for(size_t p=0;p<pixels;++p) {
+            double sum=0;
+            for(size_t q=0;q<count;++q) sum+=data[p+q*pixels];
+            result[p]+=float(sum/(3.0*count));
+        }
+    }
+    return result;
 }
 
 /*****************************************************************************
@@ -10840,6 +11186,7 @@ sam3_result sam3_segment_pvs(sam3_state& state,
     ggml_set_output(dec_out.iou_pred);
     ggml_set_output(dec_out.obj_score);
     ggml_set_output(dec_out.sam_token);
+    if(dec_out.mask_tokens) ggml_set_output(dec_out.mask_tokens);
 
     // ── Build and allocate graph ─────────────────────────────────────────
     struct ggml_cgraph* graph = ggml_new_graph_custom(ctx0, 32768, false);
@@ -10847,6 +11194,8 @@ sam3_result sam3_segment_pvs(sam3_state& state,
     ggml_build_forward_expand(graph, dec_out.iou_pred);
     ggml_build_forward_expand(graph, dec_out.obj_score);
     ggml_build_forward_expand(graph, dec_out.sam_token);
+    if(dec_out.mask_tokens) ggml_build_forward_expand(graph, dec_out.mask_tokens);
+    for(auto* t:dec_out.saliency) if(t) ggml_build_forward_expand(graph,t);
 
     auto* galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(model.backend));
     if (!ggml_gallocr_reserve(galloc, graph)) {
@@ -11036,6 +11385,8 @@ sam3_result sam3_segment_pvs(sam3_state& state,
     float obj_logit = 0.0f;
     ggml_backend_tensor_get(dec_out.obj_score, &obj_logit, 0, sizeof(float));
     float obj_score = 1.0f / (1.0f + expf(-obj_logit));
+    if(hp.model_type==SAM3_MODEL_EFFICIENT_SAM2 && model.efficient_video_preprocessing)
+        efficient_sam2::gate_absent_logits(masks_data,obj_logit);
 
     // SAM output token: [D, 1] — needed for object pointer extraction in tracking
     std::vector<float> sam_token_data(D);
@@ -11060,6 +11411,13 @@ sam3_result sam3_segment_pvs(sam3_state& state,
     for (int m = start_idx; m < end_idx; ++m) {
         sam3_detection det;
         det.sam_token = sam_token_data;
+        if(hp.model_type == SAM3_MODEL_EFFICIENT_SAM2) {
+            det.object_logit=obj_logit;
+            det.low_res_logits.assign(masks_data.begin()+m*mask_hw*mask_hw,masks_data.begin()+(m+1)*mask_hw*mask_hw);
+            det.decoder_saliency=sam2_efficient_read_saliency(dec_out);
+            if(params.multimask && hp.use_multimask_token_for_obj_ptr && dec_out.mask_tokens)
+                ggml_backend_tensor_get(dec_out.mask_tokens,det.sam_token.data(),m*D*sizeof(float),D*sizeof(float));
+        }
 
         // Resize mask from 288×288 to original image size
         const float* mask_ptr = masks_data.data() + m * mask_hw * mask_hw;
@@ -11095,6 +11453,7 @@ sam3_result sam3_segment_pvs(sam3_state& state,
             }
         }
         det.box = {(float)min_x, (float)min_y, (float)max_x, (float)max_y};
+        if(hp.model_type==SAM3_MODEL_EFFICIENT_SAM2 && min_x>max_x) det.box={0,0,0,0};
 
         result.detections.push_back(std::move(det));
     }
@@ -11123,6 +11482,8 @@ struct sam3_prop_output {
     std::vector<float> iou_scores;
     float obj_score;
     std::vector<float> sam_token;
+    std::vector<float> all_multimask_logits;
+    std::vector<float> decoder_saliency;
     int n_masks, mask_h, mask_w;
 };
 
@@ -11193,6 +11554,8 @@ static sam3_prop_output sam3_propagate_single(
     const int N_per_slot = use_perceiver ? (hp.perceiver_n_latents_1d + hp.perceiver_n_latents_2d) : N;
 
     int n_sel = (int)sel.size();
+    const bool efficient = hp.model_type == SAM3_MODEL_EFFICIENT_SAM2;
+    std::vector<int> memory_frame_ids;
     std::vector<std::vector<float>> slot_feats(n_sel), slot_pes(n_sel);
     std::vector<int> spatial_tpos(n_sel, 1);  // default t_pos=1 for non-cond
     for (int s = 0; s < n_sel; ++s) {
@@ -11217,6 +11580,9 @@ static sam3_prop_output sam3_propagate_single(
             }
         }
         spatial_tpos[s] = mem_bank[sel[s]].is_cond_frame ? 0 : (n_sel - s);
+        if(efficient) spatial_tpos[s]=efficient_sam2::temporal_position(tracker.frame_index,
+            mem_bank[sel[s]].frame_index,mem_bank[sel[s]].is_cond_frame,hp.num_maskmem);
+        memory_frame_ids.push_back(mem_bank[sel[s]].frame_index);
     }
 
     int P = std::min((int)ptr_bank.size(), hp.max_obj_ptrs);
@@ -11231,7 +11597,8 @@ static sam3_prop_output sam3_propagate_single(
         if (ptr_tpos[p] < 1) ptr_tpos[p] = 1;  // minimum distance of 1
     }
 
-    auto pd = sam3_build_prompt_and_pos(model, slot_feats, slot_pes, spatial_tpos, obj_ptrs, ptr_tpos, H);
+    auto pd = sam3_build_prompt_and_pos(model, slot_feats, slot_pes, spatial_tpos, obj_ptrs, ptr_tpos, H,
+        efficient?efficient_sam2::pointer_position_denominator(tracker.efficient_sequence_length,hp.max_obj_ptrs):15);
 
     // ── RoPE frequencies (cached) ──────────────────────────────────────
     sam3_ensure_tracker_pe_caches(tracker, hp, H);
@@ -11268,6 +11635,11 @@ static sam3_prop_output sam3_propagate_single(
         }
     }
 
+    std::vector<float> efficient_conditioned;
+    if(efficient && !sam2_efficient_memory(tracker,state,model,masklet.instance_id,masklet.first_frame,
+        pd,memory_frame_ids,rope_q_reord,rope_k_data,efficient_conditioned)) return output;
+
+    sam2_profile_scope decoder_profile("decoder.propagate",efficient);
     // ── Build graph ─────────────────────────────────────────────────────
     const size_t buf_size = ggml_tensor_overhead() * 32768 + ggml_graph_overhead() * 2;
     struct ggml_init_params gparams = {buf_size, nullptr, true};
@@ -11305,14 +11677,17 @@ static sam3_prop_output sam3_propagate_single(
         ggml_set_input(rope_k_t);
     }
 
-    auto* conditioned = sam3_build_mem_attn_graph(ctx0, model, curr, src_pos_t,
-                                                  prompt_t, prompt_pos_t,
-                                                  rope_q_t, rope_k_t,
-                                                  pd.num_obj_ptr_tokens);
+    auto* conditioned = efficient ? ggml_new_tensor_3d(ctx0,GGML_TYPE_F32,D,N,1)
+        : sam3_build_mem_attn_graph(ctx0, model, curr, src_pos_t,
+                                    prompt_t, prompt_pos_t, rope_q_t, rope_k_t,pd.num_obj_ptr_tokens);
+    if(efficient) ggml_set_input(conditioned);
     auto* cond_spatial = ggml_reshape_4d(ctx0, conditioned, D, H, H, 1);
 
-    // Bug 3 fix: single not_a_point_embed token instead of empty sparse
-    auto* sparse_in = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, D, 1, 1);
+    // Efficient Python video creates one empty point, then PromptEncoder adds
+    // another padding point because boxes=None. Both are not_a_point embeddings.
+    // Keep the inherited single-token path for legacy architectures.
+    const int empty_prompt_tokens=efficient?2:1;
+    auto* sparse_in = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, D, empty_prompt_tokens, 1);
     ggml_set_name(sparse_in, "prop_sparse");
     ggml_set_input(sparse_in);
 
@@ -11346,6 +11721,7 @@ static sam3_prop_output sam3_propagate_single(
     ggml_build_forward_expand(graph, dec.obj_score);
     ggml_build_forward_expand(graph, dec.sam_token);
     if (dec.mask_tokens) ggml_build_forward_expand(graph, dec.mask_tokens);
+    for(auto* t:dec.saliency) if(t) ggml_build_forward_expand(graph,t);
 
     auto* galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(model.backend));
     if (!ggml_gallocr_reserve(galloc, graph) || !ggml_gallocr_alloc_graph(galloc, graph)) {
@@ -11354,12 +11730,15 @@ static sam3_prop_output sam3_propagate_single(
         return output;
     }
 
-    // Upload prompt data
+    // Upload only tensors consumed by this graph.
+    if(efficient) ggml_backend_tensor_set(conditioned,efficient_conditioned.data(),0,efficient_conditioned.size()*sizeof(float));
+    else {
     ggml_backend_tensor_set(prompt_t, pd.prompt.data(), 0, pd.prompt.size() * sizeof(float));
     ggml_backend_tensor_set(prompt_pos_t, pd.prompt_pos.data(), 0, pd.prompt_pos.size() * sizeof(float));
     ggml_backend_tensor_set(rope_q_t, rope_q_reord.data(), 0, rope_q_reord.size() * sizeof(float));
     if (rope_k_t && !rope_k_data.empty())
         ggml_backend_tensor_set(rope_k_t, rope_k_data.data(), 0, rope_k_data.size() * sizeof(float));
+    }
 
     // Set default obj_score when pred_obj_scores=False (older SAM2 models)
     if (!model.sam_dec.obj_score_token) {
@@ -11368,12 +11747,15 @@ static sam3_prop_output sam3_propagate_single(
     }
 
     // Upload src_pos (sinusoidal PE 256-dim)
-    ggml_backend_tensor_set(src_pos_t, tracker.cached_sinpe_256.data(), 0,
+    if(!efficient) ggml_backend_tensor_set(src_pos_t, tracker.cached_sinpe_256.data(), 0,
                             tracker.cached_sinpe_256.size() * sizeof(float));
 
     // Upload not_a_point_embed, image_pe, dense_emb from state PE cache
     sam3_populate_pe_cache(state, model);
-    ggml_backend_tensor_set(sparse_in, state.not_a_point_cache, 0, D * sizeof(float));
+    if(efficient) {
+        const auto empty_prompt=efficient_sam2::empty_video_prompt(state.not_a_point_cache,D);
+        ggml_backend_tensor_set(sparse_in,empty_prompt.data(),0,empty_prompt.size()*sizeof(float));
+    } else ggml_backend_tensor_set(sparse_in,state.not_a_point_cache,0,D*sizeof(float));
     ggml_backend_tensor_set(image_pe, state.dense_pe_cache.data(), 0,
                             state.dense_pe_cache.size() * sizeof(float));
     ggml_backend_tensor_set(dense_emb, state.dense_nomask_cache.data(), 0,
@@ -11383,7 +11765,7 @@ static sam3_prop_output sam3_propagate_single(
     {
         std::vector<float> c2(D * N);
         ggml_backend_tensor_get(state.neck_trk[2], c2.data(), 0, D * N * sizeof(float));
-        ggml_backend_tensor_set(curr, c2.data(), 0, D * N * sizeof(float));
+        if(!efficient) ggml_backend_tensor_set(curr, c2.data(), 0, D * N * sizeof(float));
 
         std::vector<float> s0(D * H0 * H0);
         ggml_backend_tensor_get(state.neck_trk[0], s0.data(), 0, D * H0 * H0 * sizeof(float));
@@ -11394,12 +11776,14 @@ static sam3_prop_output sam3_propagate_single(
         ggml_backend_tensor_set(trk_s1, s1.data(), 0, D * H1 * H1 * sizeof(float));
     }
 
-    if (!sam3_graph_compute(model.backend, graph, 4)) {
+    decoder_profile.lap("build_allocate_upload");
+    if (!sam3_graph_compute(model.backend, graph, state.n_threads)) {
         ggml_gallocr_free(galloc);
         ggml_free(ctx0);
         return output;
     }
 
+    decoder_profile.lap("compute");
     const int mhw = H * 4;
     const int num_mask_tokens = hp.sam_n_multimask + 1;  // 4
 
@@ -11451,6 +11835,14 @@ static sam3_prop_output sam3_propagate_single(
         ggml_backend_tensor_get(dec.sam_token, output.sam_token.data(), 0, D * sizeof(float));
     }
 
+    if(hp.model_type == SAM3_MODEL_EFFICIENT_SAM2) {
+        output.all_multimask_logits.resize(3*mhw*mhw);
+        ggml_backend_tensor_get(dec.masks,output.all_multimask_logits.data(),mhw*mhw*sizeof(float),
+            output.all_multimask_logits.size()*sizeof(float));
+        output.decoder_saliency=sam2_efficient_read_saliency(dec);
+        efficient_sam2::gate_absent_logits(output.mask_logits,output.obj_score);
+        efficient_sam2::gate_absent_logits(output.all_multimask_logits,output.obj_score);
+    }
     ggml_gallocr_free(galloc);
     ggml_free(ctx0);
     return output;
@@ -11512,6 +11904,7 @@ static bool sam3_encode_memory(
     int inst_id, const float* mask_logits, int mask_h, int mask_w,
     int frame_idx, bool is_cond, float obj_score) {
     const auto& hp = model.hparams;
+    sam2_profile_scope profile("memory.encode",hp.model_type==SAM3_MODEL_EFFICIENT_SAM2);
     const int D = hp.neck_dim, MD = hp.mem_out_dim;
     const int H = sam3_eff_feat_size(state, hp);
     const int HIGH_RES = sam3_eff_img_size(state, hp);
@@ -11542,7 +11935,7 @@ static bool sam3_encode_memory(
         ds = ggml_add(ctx0, ds, ggml_reshape_4d(ctx0, model.mem_enc.ds_conv_b[s], 1, 1, out_ch, 1));
         ds = ggml_cont(ctx0, ggml_permute(ctx0, ds, 1, 2, 0, 3));  // conv→internal (ne[0]=channel)
         ds = sam3_layer_norm_2d(ctx0, ds, model.mem_enc.ds_norm_w[s], model.mem_enc.ds_norm_b[s]);
-        ds = ggml_gelu(ctx0, ds);
+        ds = hp.model_type==SAM3_MODEL_EFFICIENT_SAM2?ggml_gelu_erf(ctx0,ds):ggml_gelu(ctx0,ds);
         ds = ggml_cont(ctx0, ggml_permute(ctx0, ds, 2, 0, 1, 3));  // internal→conv
     }
     ds = ggml_conv_2d(ctx0, model.mem_enc.ds_conv_w[4], ds, 1, 1, 0, 0, 1, 1);
@@ -11567,7 +11960,7 @@ static bool sam3_encode_memory(
                                      model.mem_enc.fuser_norm_w[i], model.mem_enc.fuser_norm_b[i],
                                      model.mem_enc.fuser_fc1_w[i], model.mem_enc.fuser_fc1_b[i],
                                      model.mem_enc.fuser_fc2_w[i], model.mem_enc.fuser_fc2_b[i],
-                                     model.mem_enc.fuser_gamma[i]);
+                                     model.mem_enc.fuser_gamma[i],hp.model_type==SAM3_MODEL_EFFICIENT_SAM2);
     auto* fused_out = ggml_cont(ctx0, ggml_permute(ctx0, fused, 2, 0, 1, 3));
     auto* mo = ggml_conv_2d(ctx0, model.mem_enc.out_proj_w, fused_out, 1, 1, 0, 0, 1, 1);
     mo = ggml_add(ctx0, mo, ggml_reshape_4d(ctx0, model.mem_enc.out_proj_b, 1, 1, MD, 1));
@@ -11588,17 +11981,23 @@ static bool sam3_encode_memory(
     {
         std::vector<float> pix_data(D * H * H);
         ggml_backend_tensor_get(state.neck_trk[2], pix_data.data(), 0, D * H * H * sizeof(float));
+        if(hp.model_type==SAM3_MODEL_EFFICIENT_SAM2)
+            sam2_diag_dump(frame_idx,"neck2",pix_data.data(),pix_data.size());
         ggml_backend_tensor_set(pix_in_raw, pix_data.data(), 0, D * H * H * sizeof(float));
     }
-    if (!sam3_graph_compute(model.backend, g, 4)) {
+    profile.lap("preprocess_build_allocate_upload");
+    if (!sam3_graph_compute(model.backend, g, state.n_threads)) {
         ggml_gallocr_free(ga);
         ggml_free(ctx0);
         return false;
     }
 
+    profile.lap("compute");
     std::vector<float> md(MD * H * H);
     ggml_backend_tensor_get(mo, md.data(), 0, md.size() * sizeof(float));
 
+    if(hp.model_type==SAM3_MODEL_EFFICIENT_SAM2)
+        sam2_diag_dump(frame_idx,"mem_raw",md.data(),md.size());
     // Apply no_obj_embed_spatial if occluded (SAM2.1 only — EdgeTAM does not have this)
     if (obj_score <= 0.0f && model.no_obj_embed_spatial) {
         std::vector<float> no_obj_emb(MD);
@@ -11613,7 +12012,11 @@ static bool sam3_encode_memory(
         for (int i = 0; i < MD * H * H; ++i)
             md[i] += no_obj_emb[i % MD];
     }
+    if(hp.model_type == SAM3_MODEL_EFFICIENT_SAM2)
+        for(auto& value:md) value=efficient_sam2::round_bfloat16(value);
 
+    if(hp.model_type==SAM3_MODEL_EFFICIENT_SAM2)
+        sam2_diag_dump(frame_idx,"mem_bf16",md.data(),md.size());
     if (!tracker.ctx) {
         struct ggml_init_params tp = {ggml_tensor_overhead() * 4096, nullptr, true};
         tracker.ctx = ggml_init(tp);
@@ -11673,42 +12076,35 @@ static bool sam3_encode_memory(
         return true;
     }
 
-    // ── Standard path (SAM2/SAM3): store raw [MD, H, H] features ────────
-    // Store spatial features
-    auto* st = ggml_new_tensor_4d(tracker.ctx, GGML_TYPE_F32, MD, H, H, 1);
-    auto* sb = ggml_backend_alloc_buffer(model.backend, MD * H * H * sizeof(float));
-    struct ggml_tallocr ta = ggml_tallocr_new(sb);
-    ggml_tallocr_alloc(&ta, st);
-    tracker.owned_buffers.push_back(sb);
-    ggml_backend_tensor_set(st, md.data(), 0, md.size() * sizeof(float));
-
-    // Compute and store sinusoidal spatial PE
-    sam3_ensure_tracker_pe_caches(tracker, hp, H);
-    const auto& pe_data = tracker.cached_sinpe_64;
-    auto* spe = ggml_new_tensor_4d(tracker.ctx, GGML_TYPE_F32, MD, H, H, 1);
-    auto* speb = ggml_backend_alloc_buffer(model.backend, MD * H * H * sizeof(float));
-    struct ggml_tallocr ta2 = ggml_tallocr_new(speb);
-    ggml_tallocr_alloc(&ta2, spe);
-    tracker.owned_buffers.push_back(speb);
-    ggml_backend_tensor_set(spe, pe_data.data(), 0, pe_data.size() * sizeof(float));
-
-    sam3_memory_slot slot;
-    slot.spatial_feats = st;
-    slot.spatial_pe = spe;
-    slot.frame_index = frame_idx;
-    slot.is_cond_frame = is_cond;
+    // Reuse evicted slots: long videos must not retain one backend allocation
+    // per historical frame. The conditioning slot is preserved.
     auto& bk = tracker.mem_banks[inst_id];
-    bk.push_back(slot);
-    while ((int)bk.size() > hp.num_maskmem) {
-        bool removed = false;
-        for (auto it = bk.begin(); it != bk.end(); ++it)
-            if (!it->is_cond_frame) {
-                bk.erase(it);
-                removed = true;
-                break;
-            }
-        if (!removed) bk.erase(bk.begin() + 1);
+    sam3_memory_slot slot;
+    if ((int)bk.size() >= hp.num_maskmem) {
+        auto it = std::find_if(bk.begin(), bk.end(), [](const sam3_memory_slot& value) { return !value.is_cond_frame; });
+        if (it == bk.end()) it = bk.begin()+1;
+        slot = *it;
+        bk.erase(it);
     }
+    if (!slot.spatial_feats) {
+        slot.spatial_feats=ggml_new_tensor_4d(tracker.ctx,GGML_TYPE_F32,MD,H,H,1);
+        auto* buffer=ggml_backend_alloc_buffer(model.backend,MD*H*H*sizeof(float));
+        auto alloc=ggml_tallocr_new(buffer); ggml_tallocr_alloc(&alloc,slot.spatial_feats);
+        tracker.owned_buffers.push_back(buffer);
+        slot.spatial_pe=ggml_new_tensor_4d(tracker.ctx,GGML_TYPE_F32,MD,H,H,1);
+        buffer=ggml_backend_alloc_buffer(model.backend,MD*H*H*sizeof(float));
+        alloc=ggml_tallocr_new(buffer); ggml_tallocr_alloc(&alloc,slot.spatial_pe);
+        tracker.owned_buffers.push_back(buffer);
+    }
+    ggml_backend_tensor_set(slot.spatial_feats,md.data(),0,md.size()*sizeof(float));
+    sam3_ensure_tracker_pe_caches(tracker,hp,H);
+    const auto& pe_data=tracker.cached_sinpe_64;
+    if(hp.model_type==SAM3_MODEL_EFFICIENT_SAM2)
+        sam2_diag_dump(frame_idx,"mem_pos",pe_data.data(),pe_data.size());
+    ggml_backend_tensor_set(slot.spatial_pe,pe_data.data(),0,pe_data.size()*sizeof(float));
+    slot.frame_index=frame_idx;
+    slot.is_cond_frame=is_cond;
+    bk.push_back(slot);
     ggml_gallocr_free(ga);
     ggml_free(ctx0);
     return true;
@@ -11718,19 +12114,27 @@ static void sam3_store_obj_ptr(
     sam3_tracker& tracker, const sam3_model& model,
     int inst_id, const float* pd, int frame_idx) {
     const int D = model.hparams.neck_dim;
+    if(model.hparams.model_type==SAM3_MODEL_EFFICIENT_SAM2)
+        sam2_diag_dump(frame_idx,"obj_ptr",pd,D);
     if (!tracker.ctx) {
         struct ggml_init_params tp = {ggml_tensor_overhead() * 4096, nullptr, true};
         tracker.ctx = ggml_init(tp);
     }
-    auto* pt = ggml_new_tensor_2d(tracker.ctx, GGML_TYPE_F32, D, 1);
-    auto* pb = ggml_backend_alloc_buffer(model.backend, D * sizeof(float));
-    struct ggml_tallocr ta = ggml_tallocr_new(pb);
-    ggml_tallocr_alloc(&ta, pt);
-    tracker.owned_buffers.push_back(pb);
-    ggml_backend_tensor_set(pt, pd, 0, D * sizeof(float));
-    auto& bk = tracker.ptr_banks[inst_id];
-    bk.push_back({frame_idx, pt});
-    while ((int)bk.size() > model.hparams.max_obj_ptrs) bk.erase(bk.begin());
+    auto& bk=tracker.ptr_banks[inst_id];
+    ggml_tensor* pt=nullptr;
+    if ((int)bk.size() >= model.hparams.max_obj_ptrs) {
+        // Efficient-SAM2 always retains the conditioning pointer, then latest
+        // non-conditioning pointers. Ordinary legacy behavior is unchanged.
+        auto it=bk.begin()+(model.hparams.model_type==SAM3_MODEL_EFFICIENT_SAM2 ? 1 : 0);
+        pt=it->second; bk.erase(it);
+    } else {
+        pt=ggml_new_tensor_2d(tracker.ctx,GGML_TYPE_F32,D,1);
+        auto* buffer=ggml_backend_alloc_buffer(model.backend,D*sizeof(float));
+        auto alloc=ggml_tallocr_new(buffer); ggml_tallocr_alloc(&alloc,pt);
+        tracker.owned_buffers.push_back(buffer);
+    }
+    ggml_backend_tensor_set(pt,pd,0,D*sizeof(float));
+    bk.push_back({frame_idx,pt});
 }
 
 sam3_tracker_ptr sam3_create_tracker(const sam3_model& model,
@@ -12019,6 +12423,11 @@ int sam3_tracker_add_instance(sam3_tracker& tracker, sam3_state& state,
                               const sam3_pvs_params& pvs_params) {
     const int D = model.hparams.neck_dim;
     const int mask_hw = sam3_eff_feat_size(state, model.hparams) * 4;
+    const bool efficient = model.hparams.model_type == SAM3_MODEL_EFFICIENT_SAM2;
+    if (efficient && !tracker.masklets.empty()) {
+        fprintf(stderr,"%s: Efficient-SAM2 currently requires independent single-object tracks; reset/reseed for another fruit\n",__func__);
+        return -1;
+    }
 
     // Run PVS to get the segmentation mask
     auto r = sam3_segment_pvs(state, model, pvs_params);
@@ -12027,7 +12436,10 @@ int sam3_tracker_add_instance(sam3_tracker& tracker, sam3_state& state,
         return -1;
     }
 
-    const auto& det = r.detections[0];
+    size_t best=0;
+    if(efficient) for(size_t i=1;i<r.detections.size();++i)
+        if(r.detections[i].iou_score>r.detections[best].iou_score) best=i;
+    const auto& det = r.detections[best];
     if (det.mask.data.empty()) {
         fprintf(stderr, "%s: PVS mask is empty\n", __func__);
         return -1;
@@ -12055,8 +12467,13 @@ int sam3_tracker_add_instance(sam3_tracker& tracker, sam3_state& state,
         }
     }
 
+    if(efficient) {
+        if(det.low_res_logits.size()!=synth_logits.size()) return -1;
+        synth_logits=det.low_res_logits;
+    }
+
     // Encode into memory bank
-    float obj_score = det.mask.obj_score;
+    float obj_score = efficient ? det.object_logit : det.mask.obj_score;
     if (!sam3_encode_memory(tracker, state, model, inst_id,
                             synth_logits.data(), mask_hw, mask_hw,
                             fi, true, obj_score)) {
@@ -12082,6 +12499,13 @@ int sam3_tracker_add_instance(sam3_tracker& tracker, sam3_state& state,
     ml.confirmed = true;
     ml.mds_sum = 1;
     tracker.masklets.push_back(std::move(ml));
+    if(efficient) {
+        tracker.efficient_windows.reset();
+        tracker.efficient_windows.update(det.low_res_logits,1,obj_score,det.decoder_saliency);
+        tracker.efficient_memory.emplace(inst_id,efficient_sam2::MemoryQueue(fi));
+        tracker.frame_index=fi+1;
+        sam2_efficient_trace(tracker,state,fi,inst_id);
+    }
 
     SAM3_LOG(2, "%s: added instance #%d (score=%.3f)\n", __func__, inst_id, det.score);
     return inst_id;
@@ -12096,6 +12520,8 @@ void sam3_tracker_reset(sam3_tracker& tracker) {
     tracker.pending.clear();
     tracker.mem_banks.clear();
     tracker.ptr_banks.clear();
+    tracker.efficient_windows.reset();
+    tracker.efficient_memory.clear();
     for (auto* b : tracker.owned_buffers)
         if (b) ggml_backend_buffer_free(b);
     tracker.owned_buffers.clear();
@@ -12116,6 +12542,14 @@ void sam3_tracker_reset(sam3_tracker& tracker) {
 sam3_tracker_ptr sam3_create_visual_tracker(
         const sam3_model& model,
         const sam3_visual_track_params& params) {
+    if (!sam3_supports_video_tracking(model)) {
+        fprintf(stderr, "%s: Efficient-SAM2 native SWR/SMR video tracking is unsupported; no dense fallback.\n", __func__);
+        return nullptr;
+    }
+    if(model.hparams.model_type==SAM3_MODEL_EFFICIENT_SAM2) {
+        try { efficient_sam2::validate_sequence(params.efficient_sequence_length,params.efficient_source_start_frame); }
+        catch(const std::exception& error) { fprintf(stderr,"%s: %s\n",__func__,error.what()); return nullptr; }
+    }
     sam3_video_params vp;
     vp.text_prompt          = "";  // no PCS detection
     vp.assoc_iou_threshold  = params.assoc_iou_threshold;
@@ -12124,6 +12558,8 @@ sam3_tracker_ptr sam3_create_visual_tracker(
     vp.fill_hole_area       = params.fill_hole_area;
     sam3_tracker_ptr tracker(new sam3_tracker());
     tracker->params = vp;
+    tracker->efficient_sequence_length=params.efficient_sequence_length;
+    tracker->efficient_source_start_frame=params.efficient_source_start_frame;
     fprintf(stderr, "%s: visual-only tracker created (max_keep_alive=%d)\n",
             __func__, params.max_keep_alive);
     return tracker;
@@ -12133,7 +12569,17 @@ sam3_result sam3_propagate_frame(
         sam3_tracker& tracker, sam3_state& state,
         const sam3_model& model, const sam3_image& frame) {
     sam3_result result;
+    if (!sam3_supports_video_tracking(model)) {
+        fprintf(stderr, "%s: Efficient-SAM2 native SWR/SMR video tracking is unsupported; no dense fallback.\n", __func__);
+        return result;
+    }
     const int D = model.hparams.neck_dim;
+    const bool efficient = model.hparams.model_type == SAM3_MODEL_EFFICIENT_SAM2;
+    if(efficient && !efficient_sam2::sequence_frame_valid(tracker.efficient_sequence_length,
+            tracker.efficient_source_start_frame,tracker.frame_index)) {
+        fprintf(stderr,"%s: frame is outside the declared initialized sequence\n",__func__); return result;
+    }
+    if(efficient) state.efficient_window_ids=tracker.efficient_windows.selected();
     if (!sam3_encode_image(state, model, frame)) return result;
     int fi = tracker.frame_index;
     fprintf(stderr, "%s: frame %d (%zu active + %zu pending)\n",
@@ -12148,6 +12594,9 @@ sam3_result sam3_propagate_frame(
         if (im == tracker.mem_banks.end() || im->second.empty()) continue;
         po[id] = sam3_propagate_single(tracker, state, model, ml, im->second, tracker.ptr_banks[id]);
         if (po[id].mask_logits.empty()) continue;
+        if(efficient) tracker.efficient_windows.update(po[id].all_multimask_logits,3,
+            po[id].obj_score,po[id].decoder_saliency);
+        if(efficient) sam2_efficient_trace(tracker,state,fi,id);
         auto rs = sam3_bilinear_interpolate(po[id].mask_logits.data(),
                                             po[id].mask_w, po[id].mask_h,
                                             state.orig_width, state.orig_height);
@@ -12223,6 +12672,12 @@ sam3_result sam3_propagate_frame(
         det.mask = mask;
         det.mask.instance_id = inst_id;
         det.mask.iou_score = score;
+        det.iou_score = score;
+        if(efficient && po.count(inst_id)) {
+            det.low_res_logits=po.at(inst_id).mask_logits;
+            det.object_logit=po.at(inst_id).obj_score;
+            det.decoder_saliency=po.at(inst_id).decoder_saliency;
+        }
         float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
         for (int p = 0; p < (int)det.mask.data.size(); ++p)
             if (det.mask.data[p] > 127) {
@@ -12277,6 +12732,45 @@ sam3_image sam3_load_image(const std::string& path) {
     img.data.assign(data, data + w * h * 3);
     stbi_image_free(data);
     return img;
+}
+
+std::string sam3_get_preprocessing(const sam3_model & model) {
+    return model.hparams.model_type == SAM3_MODEL_EFFICIENT_SAM2 && model.efficient_video_preprocessing
+        ? "sam2-video-libjpeg-rgb-islow-fancy-pil-bicubic-u8-v2" : "stb-image-bilinear-u8-v1";
+}
+
+std::string sam3_get_build_identity() {
+    return std::string(SAM2_CACHE_BUILD_ID) + ":" + SAM2_CACHE_CONFIGURATION;
+}
+
+bool sam3_get_runtime_identity(std::string & json, std::string & error) {
+    efficient_sam2::RuntimeIdentity identity;
+    const bool ok=efficient_sam2::runtime_identity(identity,error);
+    json=identity.json;
+    return ok;
+}
+
+std::string sam3_get_model_runtime_identity(const sam3_model & model) {
+    return model.runtime_identity.json.empty()?"null":model.runtime_identity.json;
+}
+
+sam3_image sam3_load_image_for_model(const std::string & path, const sam3_model & model) {
+    if (model.hparams.model_type == SAM3_MODEL_EFFICIENT_SAM2 && model.efficient_video_preprocessing) {
+        std::ifstream input(path, std::ios::binary);
+        unsigned char magic[2] = {};
+        input.read(reinterpret_cast<char *>(magic), 2);
+        if (input.gcount() == 2 && magic[0] == 0xff && magic[1] == 0xd8) {
+            sam3_image image;
+            std::string error;
+            if (!efficient_sam2::decode_jpeg_rgb(path, image.width, image.height, image.data, error)) {
+                fprintf(stderr, "%s: %s: %s\n", __func__, path.c_str(), error.c_str());
+                return {};
+            }
+            image.channels = 3;
+            return image;
+        }
+    }
+    return sam3_load_image(path);
 }
 
 bool sam3_save_mask(const sam3_mask& mask, const std::string& path) {

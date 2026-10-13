@@ -6,7 +6,10 @@
   "scripts": {
     "tauri:dev": "cd src-tauri && cargo run",
     "tauri:build": "cd src-tauri && cargo build --release",
-    "test": "node tools/run-tests.mjs"
+    "test": "node tools/run-tests.mjs && node tools/test-project.mjs && node tools/test-tracking.mjs",
+    "test:bridge": "uv run --no-project python tools/test-bridge.py"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }

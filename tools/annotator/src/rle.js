@@ -13,13 +13,14 @@
   // width*height. Writing past the intended end would silently alias into
   // other pixels and the caller would export a plausible-looking wrong mask.
   function decode(counts, width, height) {
+    if (!Array.isArray(counts) || !Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || width * height > 64 * 1024 * 1024) return null;
     const total = width * height;
     const out = new Uint8Array(total); // row-major, for ImageData
     let idx = 0;
     let value = 0;
     for (let i = 0; i < counts.length; i++) {
       const run = counts[i];
-      if (!(run >= 0) || idx + run > total) return null;
+      if (!Number.isSafeInteger(run) || run < 0 || idx + run > total) return null;
       if (value) {
         for (let k = 0; k < run; k++) {
           const pos = idx + k;
